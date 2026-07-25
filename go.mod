@@ -1,6 +1,6 @@
 module github.com/BipinRimal314/chokepoint
 
-go 1.26.5
+go 1.24
 
 require (
 	github.com/google/cel-go v0.29.2

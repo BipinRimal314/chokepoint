@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly, so a break caused by a new Go release or a dependency update is
+  # found on a schedule rather than the next time someone happens to push.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # go.mod declares 1.24 as the minimum, so 1.24 is tested to prove that
+        # claim rather than assuming it. `stable` catches breakage from new
+        # releases before a user hits it.
+        go: ["1.24", "stable"]
+        os: [ubuntu-latest, macos-latest]
+        include:
+          # Windows differs in path handling and process teardown, both of
+          # which this proxy touches; one job is enough to catch that.
+          - go: stable
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify go.mod and go.sum are tidy
+        # A stale go.mod means a fresh clone builds something different from
+        # what CI tested.
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with race detector
+        # -count=2 because the concurrency bugs that matter here are timing
+        # dependent; a single pass can miss a teardown race entirely.
+        run: go test -race -count=2 ./...
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: latest
+          install-go: false
+
+  e2e:
+    name: end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: go build -o chokepoint ./cmd/chokepoint
+
+      - name: Proxy a real MCP server subprocess
+        # The bug that dropped 40 of 41 in-flight replies passed every unit
+        # test and was only caught by running the real binary against a real
+        # child process. That is why this job exists.
+        run: |
+          python3 - <<'PY' > requests.jsonl
+          import json
+          out = [{"jsonrpc":"2.0","id":0,"method":"initialize",
+                  "params":{"protocolVersion":"2025-06-18"}}]
+          tools = ["read_file","list_dir","grep","stat"]
+          for i in range(40):
+              out.append({"jsonrpc":"2.0","id":i+1,"method":"tools/call",
+                          "params":{"name":tools[i%4],
+                                    "arguments":{"path":f"/srv/data/f{i:03d}"}}})
+          for o in out:
+              print(json.dumps(o))
+          PY
+
+          ./chokepoint --policy examples/policy.yaml \
+            -- python3 testdata/mock_mcp_server.py \
+            < requests.jsonl > responses.jsonl 2> proxy.log
+
+          python3 - <<'PY'
+          import json, sys
+          allowed = denied = 0
+          for line in open("responses.jsonl"):
+              line = line.strip()
+              if not line:
+                  continue
+              msg = json.loads(line)
+              if "error" in msg:
+                  denied += 1
+              else:
+                  allowed += 1
+          total = allowed + denied
+          print(f"responses={total} allowed={allowed} denied={denied}")
+
+          # Every request must be answered exactly once, whether by the
+          # upstream or by a policy denial. A short count means replies were
+          # dropped on teardown.
+          if total != 41:
+              sys.exit(f"FAIL: expected 41 responses, got {total}")
+          # The decomposition rule must actually fire on a 40-target sweep,
+          # otherwise the policy is decorative.
+          if denied == 0:
+              sys.exit("FAIL: the sweep was never blocked")
+          PY
+
+      - name: Show proxy log on failure
+        if: failure()
+        run: cat proxy.log
