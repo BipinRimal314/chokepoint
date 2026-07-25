@@ -119,11 +119,14 @@ exactly the over-trust the research warns about.
   session, nearly every transition repeats. Novelty is informative for short
   sessions and large tool vocabularies, and close to inert otherwise. The
   weights are not yet re-derived from labelled data.
-- **8 of 20 UBFS features are unobservable here.** Token counts and model
-  identities are not in MCP tool traffic; peer- and self-baseline features need
-  history this process does not have on a cold start. Those report 0.0, the
-  schema's neutral value, and `Vector.Coverage()` says so per feature rather
-  than letting a zero read as "normal".
+- **4 of 20 UBFS features are not computed here.** Three need a peer or
+  historical baseline this process does not have on a cold start
+  (`event_rate_zscore`, `peer_distance`, `self_deviation`); one is not derivable
+  from MCP traffic at all (`privilege_deviation_index`, since the protocol
+  carries no permission level). Those report 0.0, the schema's neutral value,
+  and `Vector.Coverage()` says so per feature rather than letting a zero read as
+  "normal". The count is asserted by a test, so this sentence cannot drift out
+  of step with the code.
 - **Target extraction is heuristic.** MCP does not standardise argument
   schemas, so targets are pulled from conventional key names (`path`, `uri`,
   `host`, …). A server using an unusual key will under-report breadth.

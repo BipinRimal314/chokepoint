@@ -55,6 +55,36 @@ func TestEveryFeatureHasCategoryAndCoverage(t *testing.T) {
 	}
 }
 
+func TestCoverageCountsMatchTheDocumentedClaim(t *testing.T) {
+	// The README states how many features are not computed. A reader has no
+	// way to check that by hand, so it is checked here: if a feature moves
+	// between categories, this fails and the docs get corrected with it.
+	//
+	// Guarding this specifically because the number was wrong once — an
+	// earlier draft claimed 8 of 20 were unobservable when the real figure is
+	// 4, overstating the limitation in the README and in a CV.
+	counts := map[Observability]int{}
+	for _, f := range FeatureOrder {
+		counts[coverage[f].Observability]++
+	}
+
+	if got := len(FeatureOrder); got != 20 {
+		t.Fatalf("feature count = %d, want 20", got)
+	}
+	if got := counts[Observable]; got != 16 {
+		t.Errorf("observable = %d, want 16", got)
+	}
+	if got := counts[NeedsBaseline]; got != 3 {
+		t.Errorf("needs-baseline = %d, want 3", got)
+	}
+	if got := counts[NotObservable]; got != 1 {
+		t.Errorf("not-observable = %d, want 1", got)
+	}
+	if got := counts[NeedsBaseline] + counts[NotObservable]; got != 4 {
+		t.Errorf("not computed = %d, want 4 (README says 4 of 20)", got)
+	}
+}
+
 func TestUnobservableFeaturesStayNeutralAndSayWhy(t *testing.T) {
 	s := feed(t, Config{}, [][2]string{
 		{"read", "a"}, {"read", "b"}, {"write", "c"}, {"list", "d"},
