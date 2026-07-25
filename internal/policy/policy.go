@@ -1,0 +1,321 @@
+// Package policy evaluates rules against MCP tool calls using CEL.
+//
+// CEL rather than a bespoke matcher because the interesting rules are
+// relational — "this tool, but only outside that directory", "this tool, but
+// not once the session has already touched thirty distinct targets" — and a
+// config format that grows predicates one at a time becomes a bad programming
+// language. CEL is also non-Turing-complete and evaluates in bounded time,
+// which matters when every rule runs in the request path of an agent.
+package policy
+
+import (
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+
+	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/common/types/ref"
+	"gopkg.in/yaml.v3"
+)
+
+// Effect is what a matching rule does.
+type Effect string
+
+const (
+	// EffectAllow permits the call and stops evaluation.
+	EffectAllow Effect = "allow"
+	// EffectDeny refuses the call, answering the agent with an error.
+	EffectDeny Effect = "deny"
+	// EffectAudit records the call and continues evaluating.
+	//
+	// Audit exists so a rule can be deployed and observed before it is armed.
+	// Turning on a deny rule that has never been measured is how a proxy
+	// becomes the thing that broke production.
+	EffectAudit Effect = "audit"
+)
+
+// Rule is one policy entry.
+type Rule struct {
+	Name string `yaml:"name"`
+	// Match is a CEL expression over the request context. Empty matches
+	// everything, which is how a catch-all default rule is written.
+	Match  string `yaml:"match"`
+	Effect Effect `yaml:"effect"`
+	// Message is returned to the agent on deny. A good one tells the agent
+	// what to do instead, because the agent is the one that has to recover.
+	Message string `yaml:"message"`
+
+	program cel.Program
+}
+
+// Policy is an ordered rule set.
+//
+// Rules are evaluated in order and the first match wins. Order-dependence is
+// deliberate: it makes "deny this one thing, allow the rest" expressible
+// without negation, and it makes the effective policy readable top to bottom.
+type Policy struct {
+	// DefaultEffect applies when no rule matches. Defaults to allow, so that
+	// installing chokepoint without writing a policy does not break a working
+	// agent — the tool has to be safe to introduce before it can be adopted.
+	DefaultEffect Effect `yaml:"default_effect"`
+	Rules         []Rule `yaml:"rules"`
+}
+
+// Request is the evaluation context exposed to CEL expressions.
+type Request struct {
+	// Tool is the tool name, empty for non-tool requests.
+	Tool string
+	// Method is the JSON-RPC method, e.g. "tools/call".
+	Method string
+	// Args is the decoded arguments object.
+	Args map[string]any
+	// Targets are the target-like strings extracted from Args.
+	Targets []string
+	// SessionCalls is how many calls this session has made.
+	SessionCalls int
+	// SessionTargets is how many distinct targets this session has touched.
+	SessionTargets int
+	// DecompositionScore is the detector's current assessment, in [0,1].
+	DecompositionScore float64
+}
+
+// Decision is the outcome of evaluating a policy.
+type Decision struct {
+	Effect Effect
+	// Rule is the name of the rule that matched, empty when the default applied.
+	Rule    string
+	Message string
+	// Audited lists audit rules that matched along the way.
+	Audited []string
+}
+
+// declarations are the variables every rule may reference.
+//
+// Declared explicitly, and with types, so that a typo in a rule is a load-time
+// compile error rather than a silent false at midnight. A policy engine that
+// fails open on a misspelled field is worse than no policy engine, because it
+// reports protection it is not providing.
+func declarations() []cel.EnvOption {
+	return []cel.EnvOption{
+		cel.Variable("tool", cel.StringType),
+		cel.Variable("method", cel.StringType),
+		cel.Variable("args", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("targets", cel.ListType(cel.StringType)),
+		cel.Variable("session_calls", cel.IntType),
+		cel.Variable("session_targets", cel.IntType),
+		cel.Variable("decomposition_score", cel.DoubleType),
+	}
+}
+
+// Compile prepares every rule for evaluation.
+//
+// All rules are compiled up front rather than lazily on first match, so a
+// broken expression is reported when the policy is loaded instead of the first
+// time an agent happens to trigger it.
+func (p *Policy) Compile() error {
+	env, err := cel.NewEnv(declarations()...)
+	if err != nil {
+		return fmt.Errorf("build CEL environment: %w", err)
+	}
+
+	if p.DefaultEffect == "" {
+		p.DefaultEffect = EffectAllow
+	}
+	if err := validEffect(p.DefaultEffect); err != nil {
+		return fmt.Errorf("default_effect: %w", err)
+	}
+
+	for i := range p.Rules {
+		rule := &p.Rules[i]
+		if rule.Name == "" {
+			return fmt.Errorf("rule %d: name is required", i)
+		}
+		if err := validEffect(rule.Effect); err != nil {
+			return fmt.Errorf("rule %q: %w", rule.Name, err)
+		}
+		// An empty match is the catch-all form and needs no program.
+		if strings.TrimSpace(rule.Match) == "" {
+			continue
+		}
+
+		ast, issues := env.Compile(rule.Match)
+		if issues != nil && issues.Err() != nil {
+			return fmt.Errorf("rule %q: %w", rule.Name, issues.Err())
+		}
+		// A rule that returns a non-boolean is a mistake that would otherwise
+		// surface as "never matches".
+		if ast.OutputType() != cel.BoolType {
+			return fmt.Errorf("rule %q: match must evaluate to bool, got %s",
+				rule.Name, ast.OutputType())
+		}
+
+		prog, err := env.Program(ast)
+		if err != nil {
+			return fmt.Errorf("rule %q: build program: %w", rule.Name, err)
+		}
+		rule.program = prog
+	}
+	return nil
+}
+
+func validEffect(e Effect) error {
+	switch e {
+	case EffectAllow, EffectDeny, EffectAudit:
+		return nil
+	case "":
+		return fmt.Errorf("effect is required (allow, deny, or audit)")
+	default:
+		return fmt.Errorf("unknown effect %q (want allow, deny, or audit)", e)
+	}
+}
+
+// Evaluate returns the decision for req.
+//
+// Never returns an error. A rule that fails at runtime — a type mismatch on a
+// dynamic field, say — is treated as not matching and recorded in the
+// decision's Audited list. The alternative, aborting the session, would let a
+// single bad expression take down every agent behind the proxy.
+func (p *Policy) Evaluate(req Request) Decision {
+	vars := map[string]any{
+		"tool":                req.Tool,
+		"method":              req.Method,
+		"args":                req.Args,
+		"targets":             req.Targets,
+		"session_calls":       req.SessionCalls,
+		"session_targets":     req.SessionTargets,
+		"decomposition_score": req.DecompositionScore,
+	}
+	if vars["args"] == nil {
+		vars["args"] = map[string]any{}
+	}
+	if req.Targets == nil {
+		vars["targets"] = []string{}
+	}
+
+	var audited []string
+
+	for i := range p.Rules {
+		rule := &p.Rules[i]
+
+		matched, err := rule.matches(vars)
+		if err != nil {
+			audited = append(audited, fmt.Sprintf("%s: evaluation error: %v", rule.Name, err))
+			continue
+		}
+		if !matched {
+			continue
+		}
+
+		switch rule.Effect {
+		case EffectAudit:
+			audited = append(audited, rule.Name)
+			continue
+		default:
+			return Decision{
+				Effect:  rule.Effect,
+				Rule:    rule.Name,
+				Message: rule.Message,
+				Audited: audited,
+			}
+		}
+	}
+
+	return Decision{Effect: p.DefaultEffect, Audited: audited}
+}
+
+// matches evaluates one rule's expression.
+func (r *Rule) matches(vars map[string]any) (bool, error) {
+	if r.program == nil {
+		// Catch-all rule.
+		return true, nil
+	}
+	out, _, err := r.program.Eval(vars)
+	if err != nil {
+		return false, err
+	}
+	return isTrue(out), nil
+}
+
+func isTrue(v ref.Val) bool {
+	b, ok := v.(types.Bool)
+	return ok && bool(b)
+}
+
+// Load reads and compiles a policy from a YAML file.
+func Load(path string) (*Policy, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read policy: %w", err)
+	}
+	return Parse(data)
+}
+
+// Parse reads and compiles a policy from YAML bytes.
+func Parse(data []byte) (*Policy, error) {
+	var p Policy
+	// KnownFields makes a typo'd key an error instead of a silently ignored
+	// setting — the same failure class as a misspelled variable in a rule.
+	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&p); err != nil {
+		return nil, fmt.Errorf("parse policy: %w", err)
+	}
+	if err := p.Compile(); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// ExtractTargets pulls target-like strings out of a tool's arguments.
+//
+// Targets are what make a decomposed sweep visible: the same tool called with
+// the same argument shape against thirty different paths is one tool and
+// thirty targets. Keys are matched by name because MCP does not standardise
+// argument schemas across servers, so the alternative is a per-server mapping
+// nobody will maintain.
+func ExtractTargets(args map[string]any) []string {
+	const maxDepth = 4
+	seen := map[string]struct{}{}
+	collect(args, 0, maxDepth, seen)
+
+	out := make([]string, 0, len(seen))
+	for t := range seen {
+		out = append(out, t)
+	}
+	// Sorted so that a policy decision over the same call is identical run to
+	// run, and so audit records can be compared.
+	sort.Strings(out)
+	return out
+}
+
+// targetKeys are argument names that conventionally carry a target.
+var targetKeys = map[string]bool{
+	"path": true, "file": true, "filename": true, "file_path": true,
+	"uri": true, "url": true, "host": true, "hostname": true,
+	"resource": true, "target": true, "directory": true, "dir": true,
+	"query": true, "table": true, "key": true, "bucket": true,
+}
+
+func collect(v any, depth, maxDepth int, out map[string]struct{}) {
+	if depth > maxDepth {
+		// Bounded so a deeply nested or self-referential argument object
+		// cannot turn target extraction into an unbounded walk.
+		return
+	}
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if s, ok := val.(string); ok && targetKeys[strings.ToLower(k)] && s != "" {
+				out[s] = struct{}{}
+				continue
+			}
+			collect(val, depth+1, maxDepth, out)
+		}
+	case []any:
+		for _, item := range t {
+			collect(item, depth+1, maxDepth, out)
+		}
+	}
+}

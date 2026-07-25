@@ -1,0 +1,53 @@
+# chokepoint example policy
+#
+# Rules are evaluated top to bottom and the first non-audit match wins, so the
+# specific goes above the general. Anything not matched falls through to
+# default_effect.
+#
+# Available variables:
+#   tool                 string   tool name, e.g. "read_file"
+#   method               string   JSON-RPC method, e.g. "tools/call"
+#   args                 map      decoded tool arguments
+#   targets              list     target-like strings pulled out of args
+#   session_calls        int      calls made in this session
+#   session_targets      int      distinct targets touched this session
+#   decomposition_score  double   UBFS decomposition score, 0.0-1.0
+
+default_effect: allow
+
+rules:
+  # Deploy a rule as `audit` first. Watch the logs, confirm it fires when you
+  # expect and only then, and change the effect to `deny`. Arming a rule that
+  # has never been measured is how a proxy becomes the thing that broke prod.
+  - name: watch-writes
+    match: tool.startsWith("write") || tool.startsWith("delete")
+    effect: audit
+
+  # Individually legitimate calls, blocked for what they add up to. This is
+  # the rule the project exists for: the failure mode the threat-to-governance
+  # research identified as architectural rather than a tuning problem.
+  - name: halt-decomposed-sweep
+    match: decomposition_score > 0.45 && session_targets > 25
+    effect: deny
+    message: >-
+      This session has touched an unusually broad set of targets with low
+      repetition, which matches a decomposed-task pattern. Narrow the task or
+      request an operator review.
+
+  # Ordinary path containment. `targets` is already extracted from whatever
+  # argument names the server happens to use.
+  - name: no-credential-paths
+    match: targets.exists(t, t.contains("/.ssh/") || t.endsWith(".pem") || t.contains("/.aws/"))
+    effect: deny
+    message: Credential material is out of scope; use the configured secret store.
+
+  - name: no-cloud-metadata
+    match: targets.exists(t, t.contains("169.254.169.254") || t.contains("metadata.google"))
+    effect: deny
+    message: Cloud instance metadata is not reachable through this gateway.
+
+  # Recursive deletion is the one operation with no safe retry.
+  - name: no-recursive-delete
+    match: tool == "delete" && has(args.recursive) && args.recursive == true
+    effect: deny
+    message: Recursive delete is disabled. Delete specific paths instead.
