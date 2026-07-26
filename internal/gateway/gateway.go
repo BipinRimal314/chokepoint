@@ -27,12 +27,51 @@ const (
 	methodPromptsGet    = "prompts/get"
 )
 
-// Observer receives decisions for logging and metrics.
+// DecisionEvent reports what the gateway decided about one tool call.
+type DecisionEvent struct {
+	// ID is the JSON-RPC request id, used to correlate a later
+	// CompletionEvent. Empty for notifications, which never complete.
+	ID     string
+	Tool   string
+	Method string
+	// Targets are the extracted targets. Deliberately not suitable as a
+	// metric label — they are unbounded and would blow up cardinality — but
+	// useful on a trace span, where high-cardinality detail belongs.
+	Targets []string
+
+	Effect  policy.Effect
+	Rule    string
+	Audited []string
+
+	Score float64
+	// ScoreUnavailable is true when the session is too short to score. The
+	// difference matters: a 0.0 score and "not yet scoreable" are the same
+	// number and completely different facts.
+	ScoreUnavailable bool
+	SessionCalls     int
+	SessionTargets   int
+}
+
+// CompletionEvent reports the upstream's answer to a forwarded call.
+type CompletionEvent struct {
+	ID      string
+	Tool    string
+	Errored bool
+	Latency time.Duration
+}
+
+// Observer receives decisions and completions for logging, metrics, and traces.
 //
-// An interface rather than a direct dependency on the telemetry package so the
-// gateway can be tested without standing up an exporter.
+// An interface rather than a direct dependency on the telemetry package, so the
+// gateway is testable without standing up an exporter — and so that a
+// deployment wanting neither pays for neither.
+//
+// Implementations must be safe for concurrent use and must not block: they are
+// called from the request path, so a slow exporter would add latency to every
+// tool call the agent makes.
 type Observer interface {
-	ToolCall(tool string, decision policy.Decision, score float64, latency time.Duration)
+	ToolCallDecided(DecisionEvent)
+	ToolCallCompleted(CompletionEvent)
 }
 
 // Options configure a Gateway.
@@ -149,7 +188,19 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 	})
 
 	if g.opts.Observer != nil {
-		g.opts.Observer.ToolCall(params.Name, decision, assessment.Score, 0)
+		g.opts.Observer.ToolCallDecided(DecisionEvent{
+			ID:               msg.IDKey(),
+			Tool:             params.Name,
+			Method:           msg.Method,
+			Targets:          targets,
+			Effect:           decision.Effect,
+			Rule:             decision.Rule,
+			Audited:          decision.Audited,
+			Score:            assessment.Score,
+			ScoreUnavailable: assessment.BelowMinimum,
+			SessionCalls:     assessment.Calls,
+			SessionTargets:   g.distinctTargets(),
+		})
 	}
 
 	switch decision.Effect {
@@ -236,8 +287,12 @@ func (g *Gateway) completeResponse(msg *jsonrpc.Message) {
 	}
 
 	if g.opts.Observer != nil {
-		g.opts.Observer.ToolCall(call.tool, policy.Decision{Effect: policy.EffectAllow},
-			0, time.Since(call.startAt))
+		g.opts.Observer.ToolCallCompleted(CompletionEvent{
+			ID:      key,
+			Tool:    call.tool,
+			Errored: msg.Error != nil,
+			Latency: time.Since(call.startAt),
+		})
 	}
 }
 

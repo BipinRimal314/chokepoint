@@ -26,18 +26,21 @@ import (
 	"github.com/BipinRimal314/chokepoint/internal/gateway"
 	"github.com/BipinRimal314/chokepoint/internal/policy"
 	"github.com/BipinRimal314/chokepoint/internal/proxy"
+	"github.com/BipinRimal314/chokepoint/internal/telemetry"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
 type config struct {
-	policyPath  string
-	window      time.Duration
-	maxCalls    int
-	logLevel    string
-	showVersion bool
-	upstream    []string
+	policyPath   string
+	window       time.Duration
+	maxCalls     int
+	logLevel     string
+	metricsAddr  string
+	otlpEndpoint string
+	showVersion  bool
+	upstream     []string
 }
 
 func main() {
@@ -65,11 +68,14 @@ options:
   --policy PATH     policy file (YAML); omit for a transparent proxy
   --window DUR      behavioural window, e.g. 10m (default: whole session)
   --max-calls N     per-session call retention cap (default 10000)
+  --metrics-addr A  serve Prometheus metrics on A, e.g. :9090 (default off)
+  --otlp-endpoint E export OTLP/gRPC traces to E, e.g. localhost:4317 (default off)
   --log-level LEVEL debug, info, warn, error (default info)
   --version         print version and exit
 
 example:
-  chokepoint --policy policy.yaml -- npx -y @modelcontextprotocol/server-filesystem /srv
+  chokepoint --policy policy.yaml --metrics-addr :9090 \
+    -- npx -y @modelcontextprotocol/server-filesystem /srv
 `)
 }
 
@@ -100,6 +106,10 @@ func parseArgs(args []string) (config, error) {
 			cfg.policyPath, err = next()
 		case "--log-level":
 			cfg.logLevel, err = next()
+		case "--metrics-addr":
+			cfg.metricsAddr, err = next()
+		case "--otlp-endpoint":
+			cfg.otlpEndpoint, err = next()
 		case "--version", "-v":
 			cfg.showVersion = true
 		case "--help", "-h":
@@ -156,6 +166,36 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var observer gateway.Observer
+	if cfg.metricsAddr != "" || cfg.otlpEndpoint != "" {
+		tel, err := telemetry.New(ctx, telemetry.Options{
+			ServiceName:  "chokepoint",
+			Version:      version,
+			MetricsAddr:  cfg.metricsAddr,
+			OTLPEndpoint: cfg.otlpEndpoint,
+			Logger:       logger,
+		})
+		if err != nil {
+			// Refusing to start is deliberate. An operator who asked for
+			// metrics and silently got none would believe they have
+			// visibility they do not have, which is worse than a clear
+			// failure at startup.
+			return fmt.Errorf("telemetry: %w", err)
+		}
+		observer = tel
+		defer func() {
+			// A fresh context: the run context is already cancelled by the
+			// time this runs, and an exporter given a dead context flushes
+			// nothing — losing exactly the spans from the shutdown that is
+			// most likely being investigated.
+			flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := tel.Shutdown(flushCtx); err != nil {
+				logger.Warn("telemetry shutdown", "error", err)
+			}
+		}()
+	}
+
 	cmd := exec.CommandContext(ctx, cfg.upstream[0], cfg.upstream[1:]...)
 	// The child's stderr is passed through untouched: MCP servers log there,
 	// and swallowing it would make debugging one impossible from behind the
@@ -182,7 +222,8 @@ func run(cfg config) error {
 			Window:   cfg.window,
 			MaxCalls: cfg.maxCalls,
 		}),
-		Logger: logger,
+		Logger:   logger,
+		Observer: observer,
 	})
 
 	session := proxy.NewSession(proxy.Streams{

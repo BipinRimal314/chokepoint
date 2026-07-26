@@ -150,6 +150,81 @@ jobs:
               sys.exit("FAIL: the sweep was never blocked")
           PY
 
+      - name: Scrape metrics from a live session
+        # Metrics are only meaningful if they reflect a real proxied session,
+        # so this drives the binary and scrapes it mid-run rather than
+        # asserting against a hand-built Telemetry.
+        run: |
+          cat > feed.py <<'PY'
+          import json, sys, time
+
+          tools = ["read_file", "list_dir", "grep", "stat"]
+          out = sys.stdout
+          out.write(json.dumps({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                                "params": {"protocolVersion": "2025-06-18"}}) + "\n")
+          out.flush()
+          for i in range(40):
+              out.write(json.dumps({"jsonrpc": "2.0", "id": i + 1, "method": "tools/call",
+                                    "params": {"name": tools[i % 4],
+                                               "arguments": {"path": f"/srv/data/f{i:03d}"}}}) + "\n")
+              out.flush()
+              time.sleep(0.02)
+          # Hold stdin open so the endpoint can be scraped mid-session.
+          time.sleep(20)
+          PY
+
+          python3 feed.py \
+            | ./chokepoint --policy examples/policy.yaml --metrics-addr 127.0.0.1:9464 \
+              -- python3 testdata/mock_mcp_server.py > metrics-run.jsonl 2> metrics-run.log &
+          PROXY_PID=$!
+
+          # Wait for the endpoint rather than sleeping a guessed interval.
+          for _ in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:9464/healthz >/dev/null; then break; fi
+            sleep 0.5
+          done
+
+          # Then poll until all 40 calls have been accounted for. Scraping as
+          # soon as the endpoint answers races the feeder and yields a partial
+          # count — locally it read 39 of 40, which would have been an
+          # intermittent CI failure rather than an obvious one.
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9464/metrics > metrics.txt || true
+            seen=$(grep -c '^chokepoint_tool_calls_total{' metrics.txt || echo 0)
+            total=$(awk '/^chokepoint_tool_calls_total\{/ {s+=$2} END {print s+0}' metrics.txt)
+            if [ "$total" = "40" ]; then break; fi
+            sleep 0.5
+          done
+          echo "observed $total tool calls across $seen series"
+          wait $PROXY_PID || true
+
+          python3 - <<'PY'
+          import re, sys
+          text = open("metrics.txt").read()
+
+          def total(name):
+              return sum(float(m) for m in
+                         re.findall(rf'^{name}\{{[^}}]*\}} ([0-9.e+-]+)$', text, re.M))
+
+          allowed = sum(float(v) for v in
+                        re.findall(r'^chokepoint_tool_calls_total\{effect="allow"[^}]*\} ([0-9.e+-]+)$',
+                                   text, re.M))
+          denied = sum(float(v) for v in
+                       re.findall(r'^chokepoint_tool_calls_total\{effect="deny"[^}]*\} ([0-9.e+-]+)$',
+                                  text, re.M))
+          print(f"allowed={allowed} denied={denied} denials={total('chokepoint_policy_denials_total')}")
+
+          if allowed + denied != 40:
+              sys.exit(f"FAIL: counted {allowed + denied} tool calls, expected 40")
+          if denied == 0:
+              sys.exit("FAIL: the sweep was never denied, so the rule never fired")
+          if "chokepoint_decomposition_score" not in text:
+              sys.exit("FAIL: decomposition score not exported")
+          if "chokepoint_abandoned_spans_total 0" not in text:
+              sys.exit("FAIL: spans were abandoned during a clean run")
+          print("metrics assertions hold")
+          PY
+
       - name: Show proxy log on failure
         if: failure()
-        run: cat proxy.log
+        run: cat proxy.log metrics-run.log 2>/dev/null || true

@@ -108,6 +108,59 @@ My first draft of the example policy used 0.7 — above the whole band. It would
 have shipped looking authoritative and never fired once. That is exactly the
 failure this table exists to catch.
 
+## Telemetry
+
+Both subsystems are off by default and independently switchable.
+
+```bash
+chokepoint --policy policy.yaml \
+  --metrics-addr :9090 \
+  --otlp-endpoint localhost:4317 \
+  -- npx -y @modelcontextprotocol/server-filesystem /srv
+```
+
+Scraped mid-session during a 40-call sweep against the example policy:
+
+```
+chokepoint_tool_calls_total{effect="allow",tool="read_file"} 7
+chokepoint_tool_calls_total{effect="deny",tool="read_file"}  3
+chokepoint_policy_denials_total{rule="halt-decomposed-sweep",tool="grep"} 4
+chokepoint_decomposition_score 0.6115384615384616
+chokepoint_session_calls   40
+chokepoint_session_targets 40
+chokepoint_abandoned_spans_total 0
+```
+
+Plus `chokepoint_tool_call_duration_seconds` (upstream latency),
+`chokepoint_policy_audits_total`, and `chokepoint_upstream_errors_total`.
+`/healthz` sits alongside `/metrics`.
+
+Traces emit one `mcp.tool_call` span per call, carrying the tool, the policy
+effect and rule, the decomposition score, and the extracted targets.
+
+Three decisions in here are load-bearing:
+
+- **Targets are never metric labels.** They are attacker-influenced and
+  unbounded; one series per distinct file path is a denial of service against
+  your own monitoring. They go on spans, where high cardinality is fine. A test
+  asserts no metric label ever contains a target.
+- **An unscoreable session reports `NaN`, not `0`.** A registered gauge reports
+  something from the moment it exists, and `0` is a real score meaning "nothing
+  suspicious" — so a brand-new session would render as definitively safe rather
+  than as not yet measured. `NaN` is Prometheus's "no value" and draws a gap.
+- **Denied calls end their span immediately and record no latency.** No upstream
+  response is coming, so holding the span open would leak one per denial — the
+  calls an operator most wants to see — and recording a latency for a call that
+  never left the process would drag the upstream's own distribution toward zero.
+
+Spans for calls the upstream never answers are closed after `SpanTTL`
+(5 minutes) and counted in `chokepoint_abandoned_spans_total`, so a hung server
+shows up as a number rather than as unbounded memory growth.
+
+Asking for telemetry that cannot start is a startup failure, not a warning: an
+operator who believes they have visibility and does not is worse off than one
+who gets an error.
+
 ## Known limitations
 
 Stated plainly, because a detector whose limits are undocumented invites
