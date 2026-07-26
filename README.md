@@ -14,6 +14,19 @@ calls for behaviour no single call reveals.
 chokepoint --policy policy.yaml -- npx -y @modelcontextprotocol/server-filesystem /srv
 ```
 
+## See it work
+
+```bash
+./demo.sh
+```
+
+Drives the real binary against a real MCP server subprocess. The server answers
+every call successfully, so every block you see comes from policy rather than
+from something failing. It shows two calls refused for *what they are* (an SSH
+key, cloud instance metadata) and then a 40-call sweep stopped for *what it adds
+up to* — with the score and its breakdown printed, and the same run repeated
+with metrics scraped live.
+
 ## Why this exists
 
 My published research on cross-domain agent-misuse detection
