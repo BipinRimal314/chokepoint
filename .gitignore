@@ -4,3 +4,6 @@
 
 # Editor and OS noise
 .DS_Store
+
+# Local session notes for Claude Code; not part of the repo
+memory.md
