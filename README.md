@@ -121,6 +121,60 @@ My first draft of the example policy used 0.7 — above the whole band. It would
 have shipped looking authoritative and never fired once. That is exactly the
 failure this table exists to catch.
 
+## Cost of evasion
+
+Calibration answers *where do we set the threshold*. The question after it is
+*what does it cost to get under the threshold we set* — and a detector's
+honest specification includes its price of evasion
+(`go test ./internal/detect -run Evasion -v`).
+
+Attacker goal held fixed: reach 40 distinct targets. Levers: how many distinct
+tools they cycle through, and how many filler calls they pad with. `*` marks a
+session that reaches every target and still scores below 0.45.
+
+| tools \ pad | 0 | 1 | 2 | 3 | 4 | 6 | 8 |
+|---|---|---|---|---|---|---|---|
+| 1 | **0.400\*** | 0.200\* | 0.133\* | 0.100\* | 0.080\* | 0.057\* | 0.044\* |
+| 2 | 0.604 | 0.364\* | 0.265\* | 0.210\* | 0.175\* | 0.132\* | 0.107\* |
+| 4 | 0.612 | 0.361\* | 0.258\* | 0.202\* | 0.167\* | 0.125\* | 0.100\* |
+| 8 | 0.627 | 0.361\* | 0.255\* | 0.198\* | 0.163\* | 0.121\* | 0.096\* |
+| 20 | 0.686 | 0.376\* | 0.261\* | 0.201\* | 0.164\* | 0.121\* | 0.096\* |
+| 40 | 1.000 | 0.658 | 0.528 | 0.462 | 0.422\* | 0.374\* | 0.348\* |
+
+**A multi-tool sweep evades at 2× overhead** — one filler call per real one,
+80 calls to reach 40 targets. That cost is pinned by a test, so a weight change
+that makes evasion cheaper fails the build.
+
+**Timing is not a lever.** `Assess` weights only breadth, novelty, entropy and
+repetition, so the temporal features the vector computes never reach the
+decomposition score. The same sweep spaced one second apart and six hours
+apart scores identically. Spreading an attack over days moves the vector and
+not the verdict.
+
+### Known defect: a single-tool sweep is invisible
+
+The top-left cell is not an evasion, it is a hole. **A session that calls one
+tool against any number of distinct targets scores exactly 0.400 — at 20
+targets, at 5,000 targets, always.** Three of the four terms are structurally
+zero for a single-tool sequence: one transition that repeats (novelty 0), one
+symbol in the tool distribution (entropy 0), and maximal tool repetition
+(low_repetition 0). Only `target_breadth` fires, it saturates at 1.0, and the
+total pins at exactly the breadth weight.
+
+Since the shipped threshold is 0.45, **`read_file` across every path on the
+disk never crosses it.** That is the most obvious exfiltration pattern there
+is, and it costs the attacker nothing — no padding, no timing, no knowledge of
+this rule. Raising the breadth weight does not fix it either; it moves the
+ceiling but leaves a single-tool sweep scoring a constant, which any threshold
+either always catches or never does.
+
+Fixing this needs a signal that survives a constant tool sequence — the
+dependency-graph structure of the calls rather than their vocabulary
+statistics. Until then the honest statement is that chokepoint scores *how
+varied* an attack is, and an attacker who declines to vary pays nothing.
+`TestSingleToolSweepIsUnderThreshold` pins the defect so it cannot be silently
+fixed without rewriting this section.
+
 ## Telemetry
 
 Both subsystems are off by default and independently switchable.
@@ -179,12 +233,19 @@ who gets an error.
 Stated plainly, because a detector whose limits are undocumented invites
 exactly the over-trust the research warns about.
 
+- **A single-tool sweep scores a constant 0.400 and never crosses the
+  threshold.** See [Known defect](#known-defect-a-single-tool-sweep-is-invisible)
+  above. This is the most serious limit here.
 - **Breadth carries the score.** At 60 calls, `target_breadth` contributes
   0.007–0.400 while `transition_novelty` contributes 0.000–0.062. A quarter of
-  the weight is doing almost nothing: with a small tool vocabulary and a long
-  session, nearly every transition repeats. Novelty is informative for short
-  sessions and large tool vocabularies, and close to inert otherwise. The
-  weights are not yet re-derived from labelled data.
+  the weight is doing almost nothing. Novelty does not decay gradually with
+  session length — it falls off a cliff: measured over a looping vocabulary of
+  20 it reads 1.000 at 20 calls, 0.050 at 40, and **exactly 0.000 from 60
+  onward**, because once a session cycles its vocabulary twice every transition
+  has been seen more than once. A sweep written as an ordinary loop therefore
+  forfeits a quarter of the weight without attempting evasion, capping a
+  looping attacker at 0.75. The weights are not yet re-derived from labelled
+  data.
 - **4 of 20 UBFS features are not computed here.** Three need a peer or
   historical baseline this process does not have on a cold start
   (`event_rate_zscore`, `peer_distance`, `self_deviation`); one is not derivable
@@ -196,9 +257,11 @@ exactly the over-trust the research warns about.
 - **Target extraction is heuristic.** MCP does not standardise argument
   schemas, so targets are pulled from conventional key names (`path`, `uri`,
   `host`, …). A server using an unusual key will under-report breadth.
-- **Evasion is straightforward if you know the rule.** Padding a sweep with
-  repeated calls lowers breadth ratio and entropy. This raises the cost of a
-  decomposed attack; it does not close the class.
+- **Evasion is straightforward if you know the rule, and now it is priced.**
+  Padding a sweep with repeated calls lowers breadth ratio and entropy. A
+  multi-tool sweep gets under 0.45 at **2× call overhead**; a single-tool sweep
+  pays nothing. See [Cost of evasion](#cost-of-evasion). This raises the cost of
+  a decomposed attack; it does not close the class.
 - **stdio transport only.** Streamable-HTTP and SSE are not implemented yet.
 
 ## Design
