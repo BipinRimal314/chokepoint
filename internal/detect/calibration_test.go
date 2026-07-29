@@ -81,7 +81,12 @@ func TestCalibrationTable(t *testing.T) {
 		{
 			name:    "exfil-crawl",
 			benign:  false,
-			comment: "every call a distinct tool and a distinct target",
+			comment: "20-tool vocabulary cycled 3x, every target distinct",
+			// Note what this does NOT exercise: a 20-tool vocabulary over 60
+			// calls repeats every transition, so transition_novelty reads
+			// 0.000 here despite the wide target set. No shape in this table
+			// drives novelty above 0.062, which is why a quarter of the
+			// scoring weight is untested by the whole calibration suite.
 			build: func() [][2]string {
 				return repeat(60, func(i int) [2]string {
 					return [2]string{fmt.Sprintf("tool%02d", i%20), fmt.Sprintf("/target/%03d", i)}
