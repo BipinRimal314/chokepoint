@@ -299,6 +299,13 @@ worth reporting on is exactly the one with thousands of groups.
 
 ## Compliance evidence
 
+A [control mapping against the OWASP Top 10 for Agentic
+Applications](docs/owasp-asi-mapping.md) states which of the ten risks
+chokepoint addresses and which it cannot — four of ten to any real degree, one
+of the absences being merely unbuilt rather than architectural. Its identifiers
+and titles are pinned to the standard by a test.
+
+
 `--audit-log` appends every tool-call decision to a file as OTLP/JSON spans,
 one per line:
 
