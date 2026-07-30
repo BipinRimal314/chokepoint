@@ -26,7 +26,8 @@ from something failing. It shows three kinds of refusal — two calls refused fo
 *what they are* (an SSH key, cloud instance metadata), one for *where it goes*
 (a path that reads as inside the workspace and resolves outside it), and a
 40-call sweep stopped for *what it adds up to* — with the score and its
-breakdown printed, and the same run repeated with metrics scraped live.
+breakdown printed, then the same run repeated twice more: once as a session
+report, once with metrics scraped live.
 
 ## Why this exists
 
@@ -68,6 +69,9 @@ Every call it blocks is, on its own, an ordinary read of an ordinary path.
 - **Denials are protocol-correct.** A blocked call returns a well-formed
   JSON-RPC error with a matching id and an explanation. The connection stays
   up; a policy decision is not an outage.
+- **A session report, not just a score.** `--report` prints where the session
+  went, what it was denied for, and how it sat relative to its workspace — the
+  part a reviewer can act on. See [The session report](#the-session-report).
 
 ## Policy
 
@@ -234,6 +238,62 @@ declare where the agent belongs, it says nothing about a sweep confined to the
 workspace, and it does not repair the score — the defect above is still there,
 underneath it.
 
+## The session report
+
+A score is not an answer. `0.677` tells a reviewer that something looked broad
+and nothing about what to do, and the two sessions most worth telling apart
+produce the same number by construction. `--report` prints where the session
+actually went:
+
+```bash
+chokepoint --policy policy.yaml --report -- python3 testdata/mock_mcp_server.py
+```
+
+```
+chokepoint session report
+
+  44 calls carried a resource, 44 distinct
+  decomposition score: 0.666  (target_breadth 0.400, action_entropy 0.181, ...)
+  22 calls denied:
+    halt-decomposed-sweep            19
+    no-cloud-metadata                1
+    no-credential-paths              1
+    outside-declared-workspace       1
+
+  workspace: 41 of 44 calls inside
+    3 outside, in 3 distinct place(s)
+    1 reached by a path that read as inside the workspace
+    first left the workspace at call 1
+
+  outside the workspace
+                                       calls  distinct  first
+    /etc                                   1         1      3
+    /home                                  1         1      1
+    http://169.254.169.254                 1         1      2
+
+  where it went, by root
+                                       calls  distinct  first
+    /srv                                  41        41      0
+    ...
+```
+
+It reports rather than judges. The detector's verdict is included and labelled;
+the resource and scope sections are the facts a reviewer can overrule it with.
+Three things it deliberately will not do:
+
+- **Show a score it does not have.** A session below `MinCallsForScore` reads
+  "not scoreable", not `0.000` — the same distinction the metrics layer makes
+  by reporting `NaN`.
+- **Show an empty workspace section.** With no workspace declared the section
+  is omitted, because "0 calls outside" would be a clean bill of health for a
+  session nobody set a boundary for.
+- **Reorder between runs.** Groups sort by call count then name, so two
+  sessions can be diffed against each other. A test renders the same session
+  twenty times and fails on any difference.
+
+Tables are bounded (10 groups each from the CLI), because the session most
+worth reporting on is exactly the one with thousands of groups.
+
 ## Telemetry
 
 Both subsystems are off by default and independently switchable.
@@ -341,7 +401,8 @@ internal/proxy      bidirectional pump, interceptor interface
 internal/policy     CEL evaluation, target extraction
 internal/detect     UBFS features, decomposition scoring, resource normalisation
                     and workspace containment
-internal/gateway    joins the three; the only package that knows MCP shapes
+internal/gateway    joins the three; the only package that knows MCP shapes,
+                    and renders the session report
 ```
 
 Two decisions worth calling out:

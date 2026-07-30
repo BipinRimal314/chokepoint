@@ -32,6 +32,11 @@ import (
 // version is overridden at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
+// reportGroupLimit bounds each table in the session report. A sweep is both the
+// session most worth reporting on and the one with thousands of groups, and a
+// report that scrolls off the buffer is one nobody reads.
+const reportGroupLimit = 10
+
 type config struct {
 	policyPath   string
 	window       time.Duration
@@ -39,6 +44,7 @@ type config struct {
 	logLevel     string
 	metricsAddr  string
 	otlpEndpoint string
+	report       bool
 	showVersion  bool
 	upstream     []string
 }
@@ -71,6 +77,7 @@ options:
   --metrics-addr A  serve Prometheus metrics on A, e.g. :9090 (default off)
   --otlp-endpoint E export OTLP/gRPC traces to E, e.g. localhost:4317 (default off)
   --log-level LEVEL debug, info, warn, error (default info)
+  --report          print a session report to stderr on exit (default off)
   --version         print version and exit
 
 example:
@@ -110,6 +117,8 @@ func parseArgs(args []string) (config, error) {
 			cfg.metricsAddr, err = next()
 		case "--otlp-endpoint":
 			cfg.otlpEndpoint, err = next()
+		case "--report":
+			cfg.report = true
 		case "--version", "-v":
 			cfg.showVersion = true
 		case "--help", "-h":
@@ -257,6 +266,16 @@ func run(cfg config) error {
 	// the context kills it.
 	_ = serverIn.Close()
 	waitErr := cmd.Wait()
+
+	// The report goes out before any error is returned. A session that ended
+	// badly is the one whose report is worth reading, and returning first would
+	// throw it away exactly then. stderr, like the logs: stdout carries the MCP
+	// stream and one stray line there corrupts the session.
+	if cfg.report {
+		if err := gw.SessionReport().Render(os.Stderr, reportGroupLimit); err != nil {
+			logger.Warn("could not write session report", "error", err)
+		}
+	}
 
 	if runErr != nil {
 		return runErr

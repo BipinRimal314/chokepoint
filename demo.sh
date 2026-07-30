@@ -141,6 +141,15 @@ if first_sweep_block:
         print(f"   {DIM}  {k:<20} {v}{RESET}")
 PY
 
+step "The same run, as a report"
+# The score says a number. The report says where the session actually went,
+# which is the part a reviewer can act on -- and the part that separates a
+# repository scan from an exfiltration crawl, since those score identically.
+./chokepoint --policy examples/policy.yaml --report --log-level error \
+  -- python3 testdata/mock_mcp_server.py \
+  < "$WORK/requests.jsonl" > /dev/null 2> "$WORK/report.txt" || true
+sed 's/^/   /' "$WORK/report.txt"
+
 step "The same run, with metrics"
 ./chokepoint --policy examples/policy.yaml --metrics-addr 127.0.0.1:9464 --log-level error \
   -- python3 testdata/mock_mcp_server.py \

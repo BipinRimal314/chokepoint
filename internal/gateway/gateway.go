@@ -111,6 +111,11 @@ type Gateway struct {
 	// can be attributed when it arrives. MCP responses carry no method name,
 	// so without this the reply to a tool call is anonymous.
 	pending map[string]pendingCall
+	// denials counts refusals by rule name, for the session report. Kept here
+	// rather than recomputed from the detector because a denied call is not
+	// distinguishable from an allowed one in the observation stream — the
+	// detector records what was attempted, not what was permitted.
+	denials map[string]int
 }
 
 type pendingCall struct {
@@ -126,7 +131,11 @@ func New(opts Options) *Gateway {
 	if opts.Weights == (detect.Weights{}) {
 		opts.Weights = detect.DefaultWeights()
 	}
-	return &Gateway{opts: opts, pending: make(map[string]pendingCall)}
+	return &Gateway{
+		opts:    opts,
+		pending: make(map[string]pendingCall),
+		denials: make(map[string]int),
+	}
 }
 
 // toolCallParams is the params shape of a tools/call request.
@@ -234,6 +243,7 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 
 	switch decision.Effect {
 	case policy.EffectDeny:
+		g.recordDenial(decision.Rule)
 		g.opts.Logger.Warn("tool call denied",
 			"tool", params.Name,
 			"rule", decision.Rule,
@@ -284,6 +294,18 @@ func (g *Gateway) denialFor(msg *jsonrpc.Message, d policy.Decision, a detect.As
 	}
 
 	return jsonrpc.ErrorResponse(msg.ID, jsonrpc.CodePolicyDenied, message, data)
+}
+
+// recordDenial counts one refusal. The default effect denying with no rule
+// matched is attributed to "default_effect" rather than to an empty name, so
+// the report distinguishes a deny-by-default deployment from a rule firing.
+func (g *Gateway) recordDenial(rule string) {
+	if rule == "" {
+		rule = "default_effect"
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.denials[rule]++
 }
 
 func (g *Gateway) trackPending(msg *jsonrpc.Message, tool string) {
