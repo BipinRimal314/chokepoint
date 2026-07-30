@@ -144,6 +144,7 @@ func run(cfg config) error {
 	logger := newLogger(cfg.logLevel)
 
 	var pol *policy.Policy
+	var scope detect.Scope
 	if cfg.policyPath != "" {
 		var err error
 		pol, err = policy.Load(cfg.policyPath)
@@ -153,10 +154,21 @@ func run(cfg config) error {
 			// is in place.
 			return fmt.Errorf("load policy: %w", err)
 		}
+		// Same reasoning for the working set: a boundary that cannot be parsed
+		// would contain nothing, so every scope rule would report clean while
+		// enforcing nothing.
+		scope, err = detect.NewScope(pol.Workspace)
+		if err != nil {
+			return fmt.Errorf("load policy: workspace: %w", err)
+		}
 		logger.Info("policy loaded",
 			"path", cfg.policyPath,
 			"rules", len(pol.Rules),
-			"default_effect", pol.DefaultEffect)
+			"default_effect", pol.DefaultEffect,
+			"workspace", pol.Workspace)
+		if !scope.Declared() {
+			logger.Info("no workspace declared; scope rules will not fire")
+		}
 	} else {
 		logger.Warn("no policy configured; running as a transparent proxy")
 	}
@@ -222,6 +234,7 @@ func run(cfg config) error {
 			Window:   cfg.window,
 			MaxCalls: cfg.maxCalls,
 		}),
+		Scope:    scope,
 		Logger:   logger,
 		Observer: observer,
 	})

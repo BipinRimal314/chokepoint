@@ -38,6 +38,14 @@ type Resource struct {
 	Root string
 }
 
+// Empty reports whether this Resource names nothing — the result of parsing an
+// empty or unusable target. Callers must treat it as "no target" rather than as
+// a resource named "", which would otherwise group every targetless call
+// together as if it were a place.
+func (r Resource) Empty() bool {
+	return r.Path == "" && r.Host == ""
+}
+
 // ParseResource normalises a raw target string.
 //
 // An empty or unparseable target yields the zero Resource, which callers must
@@ -202,7 +210,7 @@ func (s *Session) ResourceSummary() ResourceSummary {
 			continue
 		}
 		r := ParseResource(c.Target)
-		if r.Path == "" && r.Host == "" {
+		if r.Empty() {
 			continue
 		}
 		key := r.Scheme + "://" + r.Host + r.Path

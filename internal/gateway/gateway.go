@@ -50,6 +50,17 @@ type DecisionEvent struct {
 	ScoreUnavailable bool
 	SessionCalls     int
 	SessionTargets   int
+
+	// ScopeDeclared is whether a working set was declared. Without it the two
+	// fields below are zero and mean nothing, exactly as a 0.0 score does not
+	// mean "safe" when the session is too short to score.
+	ScopeDeclared bool
+	// OutOfScope is how many of this call's targets fell outside the working
+	// set. A count, not the targets themselves — those are attacker-influenced
+	// and unbounded, so they go on the span with Targets, never on a label.
+	OutOfScope int
+	// SessionOutOfScope is distinct out-of-scope resources touched so far.
+	SessionOutOfScope int
 }
 
 // CompletionEvent reports the upstream's answer to a forwarded call.
@@ -79,6 +90,14 @@ type Options struct {
 	Policy   *policy.Policy
 	Detector *detect.Session
 	Weights  detect.Weights
+	// Scope is the declared working set, built by the caller from
+	// Policy.Workspace. It is passed in already validated rather than built
+	// here, so a malformed declaration is a startup failure the operator sees
+	// instead of a scope check that silently matches nothing.
+	//
+	// The zero Scope is undeclared: scope facts stay false and empty, and rules
+	// guarding on scope_declared do not fire.
+	Scope    detect.Scope
 	Logger   *slog.Logger
 	Observer Observer
 }
@@ -177,6 +196,9 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 	})
 
 	assessment := g.assess()
+	scope := g.scopeReport()
+	outOfScope := g.outOfScope(targets)
+
 	decision := g.evaluate(policy.Request{
 		Tool:               params.Name,
 		Method:             msg.Method,
@@ -185,6 +207,9 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 		SessionCalls:       assessment.Calls,
 		SessionTargets:     g.distinctTargets(),
 		DecompositionScore: assessment.Score,
+		ScopeDeclared:      scope.Declared,
+		OutOfScope:         outOfScope,
+		SessionOutOfScope:  scope.Distinct,
 	})
 
 	if g.opts.Observer != nil {
@@ -200,6 +225,10 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 			ScoreUnavailable: assessment.BelowMinimum,
 			SessionCalls:     assessment.Calls,
 			SessionTargets:   g.distinctTargets(),
+
+			ScopeDeclared:     scope.Declared,
+			OutOfScope:        len(outOfScope),
+			SessionOutOfScope: scope.Distinct,
 		})
 	}
 
@@ -210,8 +239,9 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 			"rule", decision.Rule,
 			"targets", targets,
 			"decomposition_score", assessment.Score,
+			"out_of_scope", len(outOfScope),
 		)
-		reply, err := g.denialFor(msg, decision, assessment)
+		reply, err := g.denialFor(msg, decision, assessment, outOfScope)
 		if err != nil {
 			return proxy.Interception{}, err
 		}
@@ -232,7 +262,7 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 // The payload names the rule and the score because the agent is the party that
 // has to change course, and "denied" with no reason produces either a retry
 // loop or a give-up — both worse than an explanation.
-func (g *Gateway) denialFor(msg *jsonrpc.Message, d policy.Decision, a detect.Assessment) ([]byte, error) {
+func (g *Gateway) denialFor(msg *jsonrpc.Message, d policy.Decision, a detect.Assessment, outOfScope []string) ([]byte, error) {
 	message := d.Message
 	if message == "" {
 		message = "blocked by chokepoint policy"
@@ -244,6 +274,13 @@ func (g *Gateway) denialFor(msg *jsonrpc.Message, d policy.Decision, a detect.As
 	if !a.BelowMinimum {
 		data["decomposition_score"] = round3(a.Score)
 		data["contributions"] = roundAll(a.Contributions)
+	}
+	// The offending targets are echoed back because they came from the agent in
+	// the first place — this leaks nothing it did not already send — and an
+	// agent told only "out of scope" cannot tell which of its arguments was the
+	// problem.
+	if len(outOfScope) > 0 {
+		data["out_of_scope"] = outOfScope
 	}
 
 	return jsonrpc.ErrorResponse(msg.ID, jsonrpc.CodePolicyDenied, message, data)
@@ -307,6 +344,44 @@ func (g *Gateway) assess() detect.Assessment {
 		return detect.Assessment{Contributions: map[string]float64{}}
 	}
 	return g.opts.Detector.Assess(g.opts.Weights)
+}
+
+// scopeReport is the session's position relative to the declared working set.
+func (g *Gateway) scopeReport() detect.ScopeReport {
+	if g.opts.Detector == nil || !g.opts.Scope.Declared() {
+		return detect.ScopeReport{FirstOutOfScope: -1}
+	}
+	return g.opts.Detector.ScopeReport(g.opts.Scope)
+}
+
+// outOfScope returns the targets of the current call that land outside the
+// working set, in the form the agent sent them.
+//
+// This checks every target on the call, while the session-level counts from
+// scopeReport see only the one target retained per observation. A call naming
+// several targets is therefore denied on any of them, but contributes at most
+// one to session_out_of_scope. Widening the observation to all targets would
+// inflate the call counts the score and its calibration table are built on, so
+// the per-call check is the one to trust for enforcement and the session count
+// is a floor.
+func (g *Gateway) outOfScope(targets []string) []string {
+	if !g.opts.Scope.Declared() {
+		return nil
+	}
+	var out []string
+	for _, t := range targets {
+		r := detect.ParseResource(t)
+		if r.Empty() {
+			// A target that names no resource is not evidence of anything. It
+			// is neither inside the boundary nor outside it, and counting it as
+			// an escape would make every malformed argument an alert.
+			continue
+		}
+		if !g.opts.Scope.Contains(r) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (g *Gateway) distinctTargets() int {

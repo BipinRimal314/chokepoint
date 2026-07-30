@@ -5,15 +5,32 @@
 # default_effect.
 #
 # Available variables:
-#   tool                 string   tool name, e.g. "read_file"
-#   method               string   JSON-RPC method, e.g. "tools/call"
-#   args                 map      decoded tool arguments
-#   targets              list     target-like strings pulled out of args
-#   session_calls        int      calls made in this session
-#   session_targets      int      distinct targets touched this session
-#   decomposition_score  double   UBFS decomposition score, 0.0-1.0
+#   tool                  string   tool name, e.g. "read_file"
+#   method                string   JSON-RPC method, e.g. "tools/call"
+#   args                  map      decoded tool arguments
+#   targets               list     target-like strings pulled out of args
+#   session_calls         int      calls made in this session
+#   session_targets       int      distinct targets touched this session
+#   decomposition_score   double   UBFS decomposition score, 0.0-1.0
+#   scope_declared        bool     whether `workspace` below is non-empty
+#   out_of_scope          list     this call's targets outside the workspace
+#   session_out_of_scope  int      distinct out-of-scope resources this session
 
 default_effect: allow
+
+# Where this agent is supposed to reach: absolute paths or URI prefixes.
+#
+# Leave it empty and every scope rule below stays inert — `scope_declared` goes
+# false and nothing is ever out of scope. That is the default because a
+# workspace only exists on a deployment whose operator can say where the agent
+# belongs, and a proxy that denies every call until told otherwise cannot be
+# introduced into a working system.
+#
+# Comparison is on the normalised resource, so "/srv/data/../../etc/shadow" is
+# out of scope and "/srv/data/sub/../f01" is not. Boundaries are segment
+# aligned: "/srv/data" does not contain "/srv/database".
+workspace:
+  - /srv
 
 rules:
   # Deploy a rule as `audit` first. Watch the logs, confirm it fires when you
@@ -34,8 +51,10 @@ rules:
       repetition, which matches a decomposed-task pattern. Narrow the task or
       request an operator review.
 
-  # Ordinary path containment. `targets` is already extracted from whatever
-  # argument names the server happens to use.
+  # Ordinary path containment. Kept above the workspace rule below so that a
+  # refusal names the specific thing being refused, and because it still
+  # applies on a deployment that declares no workspace at all. `targets` is
+  # already extracted from whatever argument names the server happens to use.
   - name: no-credential-paths
     match: targets.exists(t, t.contains("/.ssh/") || t.endsWith(".pem") || t.contains("/.aws/"))
     effect: deny
@@ -51,3 +70,23 @@ rules:
     match: tool == "delete" && has(args.recursive) && args.recursive == true
     effect: deny
     message: Recursive delete is disabled. Delete specific paths instead.
+
+  # The backstop, and the answer to the sweep the score cannot see. A session
+  # calling one tool against any number of targets scores a constant 0.400
+  # however many files it reads, so no threshold on `decomposition_score`
+  # catches it. This rule does not ask how varied the behaviour looks, only
+  # whether the call landed where the agent was sent — so it fires on the
+  # first out-of-bounds call at any scale, and an attacker who declines to
+  # vary their tool vocabulary gains nothing.
+  #
+  # It goes last because everything above it refuses something specific and
+  # can say so; this one is the general boundary.
+  #
+  # Guarded on `scope_declared` so that emptying `workspace` above disarms the
+  # rule rather than turning it into a deny-all.
+  - name: outside-declared-workspace
+    match: scope_declared && out_of_scope.size() > 0
+    effect: deny
+    message: >-
+      That path is outside this agent's declared workspace. Work within the
+      configured directories, or ask an operator to widen the workspace.

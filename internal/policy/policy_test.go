@@ -300,3 +300,94 @@ rules:
 		t.Errorf("effect = %v, want deny", got.Effect)
 	}
 }
+
+func TestWorkspaceIsCarriedAsData(t *testing.T) {
+	// This package holds the declaration and never interprets it. Normalising a
+	// path and testing containment belongs to detect, because doing it against
+	// raw strings is defeated by one "../".
+	p := mustParse(t, `
+default_effect: allow
+workspace:
+  - /srv/data
+  - https://api.example.com/v1
+rules: []
+`)
+	want := []string{"/srv/data", "https://api.example.com/v1"}
+	if !reflect.DeepEqual(p.Workspace, want) {
+		t.Errorf("Workspace = %v, want %v", p.Workspace, want)
+	}
+}
+
+func TestScopeRulesReadSessionAndCallFacts(t *testing.T) {
+	p := mustParse(t, `
+default_effect: allow
+workspace:
+  - /srv/data
+rules:
+  - name: outside-workspace
+    match: scope_declared && out_of_scope.size() > 0
+    effect: deny
+    message: outside the declared workspace
+  - name: wandering-session
+    match: scope_declared && session_out_of_scope > 5
+    effect: deny
+`)
+
+	inside := p.Evaluate(Request{
+		Tool: "read_file", ScopeDeclared: true, Targets: []string{"/srv/data/a"},
+	})
+	if inside.Effect != EffectAllow {
+		t.Errorf("in-scope call: effect = %v, want allow", inside.Effect)
+	}
+
+	outside := p.Evaluate(Request{
+		Tool: "read_file", ScopeDeclared: true,
+		Targets: []string{"/etc/passwd"}, OutOfScope: []string{"/etc/passwd"},
+	})
+	if outside.Effect != EffectDeny || outside.Rule != "outside-workspace" {
+		t.Errorf("out-of-scope call: effect = %v rule = %q, want deny outside-workspace",
+			outside.Effect, outside.Rule)
+	}
+
+	session := p.Evaluate(Request{
+		Tool: "read_file", ScopeDeclared: true, SessionOutOfScope: 9,
+	})
+	if session.Effect != EffectDeny || session.Rule != "wandering-session" {
+		t.Errorf("wandering session: effect = %v rule = %q, want deny wandering-session",
+			session.Effect, session.Rule)
+	}
+}
+
+// TestScopeRulesAreInertWithoutAWorkspace is the deployment-safety property.
+// The same policy on a deployment that declared no working set must not deny
+// everything — a scope rule with nothing to compare against protects nothing,
+// and should say so by not firing rather than by blocking the world.
+func TestScopeRulesAreInertWithoutAWorkspace(t *testing.T) {
+	p := mustParse(t, `
+default_effect: allow
+rules:
+  - name: outside-workspace
+    match: scope_declared && out_of_scope.size() > 0
+    effect: deny
+`)
+	got := p.Evaluate(Request{Tool: "read_file", Targets: []string{"/etc/passwd"}})
+	if got.Effect != EffectAllow {
+		t.Errorf("effect = %v, want allow — an undeclared workspace must not deny", got.Effect)
+	}
+}
+
+// TestUnguardedScopeRuleStillEvaluates records the sharp edge deliberately: a
+// rule that omits scope_declared is a valid expression, so it is the policy
+// author's job to guard it. The example policy shows the guarded form.
+func TestUnguardedScopeRuleStillEvaluates(t *testing.T) {
+	p := mustParse(t, `
+default_effect: allow
+rules:
+  - name: unguarded
+    match: out_of_scope.size() == 0
+    effect: deny
+`)
+	if got := p.Evaluate(Request{Tool: "read_file"}); got.Effect != EffectDeny {
+		t.Errorf("effect = %v, want deny — an unguarded rule matches on an empty list", got.Effect)
+	}
+}

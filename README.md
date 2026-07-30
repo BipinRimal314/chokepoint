@@ -22,10 +22,11 @@ chokepoint --policy policy.yaml -- npx -y @modelcontextprotocol/server-filesyste
 
 Drives the real binary against a real MCP server subprocess. The server answers
 every call successfully, so every block you see comes from policy rather than
-from something failing. It shows two calls refused for *what they are* (an SSH
-key, cloud instance metadata) and then a 40-call sweep stopped for *what it adds
-up to* — with the score and its breakdown printed, and the same run repeated
-with metrics scraped live.
+from something failing. It shows three kinds of refusal — two calls refused for
+*what they are* (an SSH key, cloud instance metadata), one for *where it goes*
+(a path that reads as inside the workspace and resolves outside it), and a
+40-call sweep stopped for *what it adds up to* — with the score and its
+breakdown printed, and the same run repeated with metrics scraped live.
 
 ## Why this exists
 
@@ -60,6 +61,10 @@ Every call it blocks is, on its own, an ordinary read of an ordinary path.
   extracted targets, and live session state.
 - **Live UBFS scoring.** The 20-feature Unified Behavioural Feature Schema from
   the paper, computed online over the tool-call stream.
+- **A declared workspace.** Optionally say where the agent belongs, and every
+  call is checked against it on the resolved path rather than the raw string —
+  so a boundary is not one `../` from useless. Unlike the score, this verdict
+  does not move with session length, tool vocabulary, padding, or timing.
 - **Denials are protocol-correct.** A blocked call returns a well-formed
   JSON-RPC error with a matching id and an explanation. The connection stays
   up; a policy decision is not an outage.
@@ -92,11 +97,51 @@ Variables available to `match`:
 | `session_calls` | int | calls made this session |
 | `session_targets` | int | distinct targets touched this session |
 | `decomposition_score` | double | UBFS decomposition score, 0.0–1.0 |
+| `scope_declared` | bool | whether a `workspace` was declared |
+| `out_of_scope` | list\<string\> | this call's targets outside the workspace |
+| `session_out_of_scope` | int | distinct out-of-scope resources this session |
 
 Rules are evaluated top to bottom; the first non-`audit` match wins. An
 undeclared variable or a non-boolean `match` is a **load-time** error, not a
 silent never-match — a policy engine that fails open on a typo reports
 protection it is not providing.
+
+### Declaring a workspace
+
+A `workspace` says where the agent is supposed to reach. Calls landing outside
+it are reported to rules through `out_of_scope` and `session_out_of_scope`:
+
+```yaml
+workspace:
+  - /srv/data
+  - https://api.example.com/v1
+
+rules:
+  - name: outside-declared-workspace
+    match: scope_declared && out_of_scope.size() > 0
+    effect: deny
+```
+
+This is a different kind of check from the score, and better where it applies.
+A score asks how unusual the behaviour looks and can be argued with; a
+workspace asks whether the call landed inside the boundary its operator
+declared. **It is the answer to the [single-tool sweep](#known-defect-a-single-tool-sweep-is-invisible)
+below** — that sweep scores a constant whatever it reads, so no threshold
+catches it, but it is out of bounds on its first call and every call after.
+
+Containment is tested on the **normalised** resource, never the raw string, so
+`/srv/data/../../etc/shadow` is out of scope while `/srv/data/sub/../f01` is
+not. Boundaries are segment-aligned: `/srv/data` does not contain
+`/srv/database`. Scheme, host and Windows volume must all match. A traversal
+that leaves the workspace is counted separately from a plainly external target
+— both are denied, but only one had to be constructed.
+
+Declaring a workspace is **opt-in, and the default is none**. Without it
+`scope_declared` is false, nothing is ever out of scope, and rules guarding on
+it stay inert — so a policy copied from a scoped deployment fails open rather
+than denying every call on a deployment whose operator never said where the
+agent belongs. That limit is the honest one: this only works where somebody can
+answer that question.
 
 ## Calibration
 
@@ -168,12 +213,26 @@ this rule. Raising the breadth weight does not fix it either; it moves the
 ceiling but leaves a single-tool sweep scoring a constant, which any threshold
 either always catches or never does.
 
-Fixing this needs a signal that survives a constant tool sequence — the
-dependency-graph structure of the calls rather than their vocabulary
-statistics. Until then the honest statement is that chokepoint scores *how
-varied* an attack is, and an attacker who declines to vary pays nothing.
-`TestSingleToolSweepIsUnderThreshold` pins the defect so it cannot be silently
-fixed without rewriting this section.
+Fixing this *in the score* needs a signal that survives a constant tool
+sequence — the dependency-graph structure of the calls rather than their
+vocabulary statistics. That is not done. The honest statement about the score
+is unchanged: chokepoint scores *how varied* an attack is, and an attacker who
+declines to vary pays nothing. `TestSingleToolSweepIsUnderThreshold` pins the
+defect so it cannot be silently fixed without rewriting this section.
+
+**What does stop it is a [declared workspace](#declaring-a-workspace)**, and
+only because it asks a different question. Scope does not care how varied the
+behaviour is; it asks whether the call landed where the agent was sent. The
+sweep is out of bounds on its first call and stays out of bounds at 20 targets
+and at 5,000 — `TestScopeVerdictIsScaleInvariant` asserts both halves, failing
+if the sweep ever starts scoring above the threshold *or* if scope stops
+catching it. `TestSingleToolSweepIsStoppedByScope` runs the same sweep through
+the real gateway.
+
+Read the mitigation for exactly what it is. It requires an operator who can
+declare where the agent belongs, it says nothing about a sweep confined to the
+workspace, and it does not repair the score — the defect above is still there,
+underneath it.
 
 ## Telemetry
 
@@ -235,7 +294,8 @@ exactly the over-trust the research warns about.
 
 - **A single-tool sweep scores a constant 0.400 and never crosses the
   threshold.** See [Known defect](#known-defect-a-single-tool-sweep-is-invisible)
-  above. This is the most serious limit here.
+  above. This is the most serious limit here. A declared workspace stops the
+  sweep without repairing the score, and only where one can be declared.
 - **Breadth carries the score.** At 60 calls, `target_breadth` contributes
   0.007–0.400 while `transition_novelty` contributes 0.000–0.062. A quarter of
   the weight is doing almost nothing. Novelty does not decay gradually with
@@ -256,7 +316,15 @@ exactly the over-trust the research warns about.
   of step with the code.
 - **Target extraction is heuristic.** MCP does not standardise argument
   schemas, so targets are pulled from conventional key names (`path`, `uri`,
-  `host`, …). A server using an unusual key will under-report breadth.
+  `host`, …). A server using an unusual key will under-report breadth — and
+  will under-report scope violations too, since a target nobody extracted is a
+  target nobody can place inside or outside a workspace.
+- **A workspace needs an operator who can declare one.** It is opt-in and off
+  by default, it says nothing about a sweep that stays inside the boundary, and
+  a workspace wide enough to be convenient is worth proportionately less. The
+  containment check itself is sound — normalised, segment-aligned,
+  traversal-resistant — but it can only be as good as the boundary it is
+  given.
 - **Evasion is straightforward if you know the rule, and now it is priced.**
   Padding a sweep with repeated calls lowers breadth ratio and entropy. A
   multi-tool sweep gets under 0.45 at **2× call overhead**; a single-tool sweep
@@ -271,7 +339,8 @@ cmd/chokepoint      CLI, process supervision, signal handling
 internal/jsonrpc    JSON-RPC 2.0 codec — preserves original bytes exactly
 internal/proxy      bidirectional pump, interceptor interface
 internal/policy     CEL evaluation, target extraction
-internal/detect     UBFS feature computation and decomposition scoring
+internal/detect     UBFS features, decomposition scoring, resource normalisation
+                    and workspace containment
 internal/gateway    joins the three; the only package that knows MCP shapes
 ```
 

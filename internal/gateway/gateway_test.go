@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -272,5 +273,213 @@ func TestNoPolicyMeansTransparent(t *testing.T) {
 	got := intercept(t, g, toolCall(t, 1, "anything", map[string]any{"path": "/x"}))
 	if got.Decision != proxy.Forward {
 		t.Errorf("decision = %v, want Forward with no policy", got.Decision)
+	}
+}
+
+// mustScope builds a working set the way the CLI does: from the policy's own
+// declaration, validated before the gateway is constructed.
+func mustScope(t *testing.T, p *policy.Policy) detect.Scope {
+	t.Helper()
+	sc, err := detect.NewScope(p.Workspace)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	return sc
+}
+
+const scopedPolicy = `
+default_effect: allow
+workspace:
+  - /srv/data
+rules:
+  - name: outside-workspace
+    match: scope_declared && out_of_scope.size() > 0
+    effect: deny
+    message: that path is outside the declared workspace
+`
+
+// TestSingleToolSweepIsStoppedByScope is the end-to-end payoff of Step 2.
+//
+// The same sweep the scorer cannot catch — one tool, any number of targets,
+// pinned at 0.400 forever by TestSingleToolSweepIsUnderThreshold — is stopped
+// on its first out-of-bounds call, because scope does not ask how varied the
+// behaviour looks.
+func TestSingleToolSweepIsStoppedByScope(t *testing.T) {
+	pol := mustPolicy(t, scopedPolicy)
+	g := New(Options{
+		Policy:   pol,
+		Scope:    mustScope(t, pol),
+		Detector: detect.NewSession(detect.Config{}),
+	})
+
+	// Ten in-bounds reads: allowed, and they build exactly the session shape
+	// the scorer sees as a single-tool sweep.
+	for i := 0; i < 10; i++ {
+		msg := toolCall(t, i, "read_file", map[string]any{
+			"path": fmt.Sprintf("/srv/data/f%02d", i),
+		})
+		if got := intercept(t, g, msg); got.Decision != proxy.Forward {
+			t.Fatalf("in-bounds call %d was not forwarded", i)
+		}
+	}
+
+	// The eleventh reads the same file with the same tool, one directory over.
+	// Nothing about the behaviour changed; only the destination did.
+	got := intercept(t, g, toolCall(t, 10, "read_file",
+		map[string]any{"path": "/home/u/.ssh/id_rsa"}))
+	if got.Decision != proxy.Reject {
+		t.Fatal("out-of-bounds call was forwarded; scope did not fire")
+	}
+
+	reply, err := jsonrpc.Parse(got.Message)
+	if err != nil {
+		t.Fatalf("denial does not parse: %v", err)
+	}
+	var errObj struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(reply.Error, &errObj); err != nil {
+		t.Fatal(err)
+	}
+	if errObj.Data["rule"] != "outside-workspace" {
+		t.Errorf("data.rule = %v, want outside-workspace", errObj.Data["rule"])
+	}
+	// The agent has to know which argument was the problem to correct itself.
+	offending, _ := errObj.Data["out_of_scope"].([]any)
+	if len(offending) != 1 || offending[0] != "/home/u/.ssh/id_rsa" {
+		t.Errorf("data.out_of_scope = %v, want the offending path", errObj.Data["out_of_scope"])
+	}
+
+	// And the score never rose above the shipped threshold throughout.
+	if score := g.assess().Score; score >= 0.45 {
+		t.Errorf("score = %.3f; the premise is that this sweep stays under 0.45", score)
+	}
+}
+
+// TestTraversalOutOfWorkspaceIsDenied checks the whole path end to end, since
+// each layer normalising correctly is worth nothing if the gateway compares
+// something else.
+func TestTraversalOutOfWorkspaceIsDenied(t *testing.T) {
+	pol := mustPolicy(t, scopedPolicy)
+	g := New(Options{
+		Policy:   pol,
+		Scope:    mustScope(t, pol),
+		Detector: detect.NewSession(detect.Config{}),
+	})
+
+	got := intercept(t, g, toolCall(t, 1, "read_file",
+		map[string]any{"path": "/srv/data/../../etc/shadow"}))
+	if got.Decision != proxy.Reject {
+		t.Error("a traversal out of the workspace was forwarded")
+	}
+
+	// A traversal that stays inside is ordinary work and must not be denied.
+	got = intercept(t, g, toolCall(t, 2, "read_file",
+		map[string]any{"path": "/srv/data/sub/../f01"}))
+	if got.Decision != proxy.Forward {
+		t.Error("a traversal that resolves back inside the workspace was denied")
+	}
+}
+
+// TestScopeFactsAreAbsentWithoutAWorkspace pins the default. A deployment that
+// declared no working set must see no scope facts at all, so that a policy
+// copied from a scoped deployment fails inert rather than closed.
+func TestScopeFactsAreAbsentWithoutAWorkspace(t *testing.T) {
+	g := New(Options{
+		Policy: mustPolicy(t, `
+default_effect: allow
+rules:
+  - name: outside-workspace
+    match: scope_declared && out_of_scope.size() > 0
+    effect: deny
+`),
+		Detector: detect.NewSession(detect.Config{}),
+	})
+
+	got := intercept(t, g, toolCall(t, 1, "read_file",
+		map[string]any{"path": "/home/u/.ssh/id_rsa"}))
+	if got.Decision != proxy.Forward {
+		t.Error("a scope rule fired on a deployment with no declared workspace")
+	}
+
+	rep := g.scopeReport()
+	if rep.Declared || rep.OutOfScope != 0 {
+		t.Errorf("scopeReport = %+v, want undeclared and empty", rep)
+	}
+	if out := g.outOfScope([]string{"/home/u/.ssh/id_rsa"}); out != nil {
+		t.Errorf("outOfScope = %v, want nil without a declared workspace", out)
+	}
+}
+
+// TestObserverSeesScopeFacts keeps telemetry honest: an operator watching the
+// decision stream should be able to see a session leaving its working set
+// without waiting for a denial.
+func TestObserverSeesScopeFacts(t *testing.T) {
+	pol := mustPolicy(t, `
+default_effect: allow
+workspace:
+  - /srv/data
+rules: []
+`)
+	rec := &recordingObserver{}
+	g := New(Options{
+		Policy:   pol,
+		Scope:    mustScope(t, pol),
+		Detector: detect.NewSession(detect.Config{}),
+		Observer: rec,
+	})
+
+	for i, path := range []string{"/srv/data/a", "/etc/passwd", "/etc/passwd", "/root/.aws/creds"} {
+		intercept(t, g, toolCall(t, i, "read_file", map[string]any{"path": path}))
+	}
+
+	if len(rec.decisions) != 4 {
+		t.Fatalf("observed %d decisions, want 4", len(rec.decisions))
+	}
+	if d := rec.decisions[0]; !d.ScopeDeclared || d.OutOfScope != 0 || d.SessionOutOfScope != 0 {
+		t.Errorf("first decision = %+v, want declared and in scope", d)
+	}
+	if d := rec.decisions[1]; d.OutOfScope != 1 || d.SessionOutOfScope != 1 {
+		t.Errorf("second decision: OutOfScope = %d SessionOutOfScope = %d, want 1 and 1",
+			d.OutOfScope, d.SessionOutOfScope)
+	}
+	// The same path again is not a new place.
+	if d := rec.decisions[2]; d.SessionOutOfScope != 1 {
+		t.Errorf("third decision: SessionOutOfScope = %d, want 1 — a repeat is not a new place",
+			d.SessionOutOfScope)
+	}
+	if d := rec.decisions[3]; d.SessionOutOfScope != 2 {
+		t.Errorf("fourth decision: SessionOutOfScope = %d, want 2", d.SessionOutOfScope)
+	}
+}
+
+type recordingObserver struct {
+	decisions []DecisionEvent
+}
+
+func (r *recordingObserver) ToolCallDecided(e DecisionEvent)   { r.decisions = append(r.decisions, e) }
+func (r *recordingObserver) ToolCallCompleted(CompletionEvent) {}
+
+// TestMultiTargetCallIsDeniedOnAnyTarget pins the asymmetry documented on
+// outOfScope: enforcement examines every target on a call, while the session
+// counts see only the one target retained per observation.
+func TestMultiTargetCallIsDeniedOnAnyTarget(t *testing.T) {
+	pol := mustPolicy(t, scopedPolicy)
+	g := New(Options{
+		Policy:   pol,
+		Scope:    mustScope(t, pol),
+		Detector: detect.NewSession(detect.Config{}),
+	})
+
+	// One argument is inside the workspace, the other is not.
+	got := intercept(t, g, toolCall(t, 1, "copy_file", map[string]any{
+		"path":   "/srv/data/a",
+		"target": "/etc/cron.d/backdoor",
+	}))
+	if got.Decision != proxy.Reject {
+		t.Fatal("a call with one out-of-scope target was forwarded")
+	}
+	if out := g.outOfScope([]string{"/srv/data/a", "/etc/cron.d/backdoor"}); len(out) != 1 {
+		t.Errorf("outOfScope = %v, want just the out-of-bounds target", out)
 	}
 }

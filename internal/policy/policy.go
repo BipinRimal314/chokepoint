@@ -60,7 +60,20 @@ type Policy struct {
 	// installing chokepoint without writing a policy does not break a working
 	// agent — the tool has to be safe to introduce before it can be adopted.
 	DefaultEffect Effect `yaml:"default_effect"`
-	Rules         []Rule `yaml:"rules"`
+	// Workspace declares where the agent is supposed to reach: absolute paths
+	// or URI prefixes. Calls landing outside it are reported to rules through
+	// out_of_scope and session_out_of_scope.
+	//
+	// Held here as data and interpreted elsewhere. This package compiles
+	// expressions and knows nothing about paths; normalising a target and
+	// testing containment is detect's job, because doing it against raw strings
+	// is defeated by a single "../". Callers pass this to detect.NewScope.
+	//
+	// Empty means undeclared, which is not the same as an empty working set:
+	// scope_declared goes false and scope rules stay inert rather than denying
+	// everything.
+	Workspace []string `yaml:"workspace"`
+	Rules     []Rule   `yaml:"rules"`
 }
 
 // Request is the evaluation context exposed to CEL expressions.
@@ -79,6 +92,17 @@ type Request struct {
 	SessionTargets int
 	// DecompositionScore is the detector's current assessment, in [0,1].
 	DecompositionScore float64
+	// ScopeDeclared is whether a workspace was declared at all. Rules must
+	// guard on it: without it, a policy written for a scoped deployment denies
+	// every call on an unscoped one.
+	ScopeDeclared bool
+	// OutOfScope holds this call's targets that fall outside the declared
+	// workspace, as observed. Empty when none do or when none was declared.
+	OutOfScope []string
+	// SessionOutOfScope is how many distinct out-of-scope resources the session
+	// has touched. Distinct rather than counted, so one path retried thirty
+	// times is not thirty places.
+	SessionOutOfScope int
 }
 
 // Decision is the outcome of evaluating a policy.
@@ -106,6 +130,9 @@ func declarations() []cel.EnvOption {
 		cel.Variable("session_calls", cel.IntType),
 		cel.Variable("session_targets", cel.IntType),
 		cel.Variable("decomposition_score", cel.DoubleType),
+		cel.Variable("scope_declared", cel.BoolType),
+		cel.Variable("out_of_scope", cel.ListType(cel.StringType)),
+		cel.Variable("session_out_of_scope", cel.IntType),
 	}
 }
 
@@ -186,12 +213,19 @@ func (p *Policy) Evaluate(req Request) Decision {
 		"session_calls":       req.SessionCalls,
 		"session_targets":     req.SessionTargets,
 		"decomposition_score": req.DecompositionScore,
+
+		"scope_declared":       req.ScopeDeclared,
+		"out_of_scope":         req.OutOfScope,
+		"session_out_of_scope": req.SessionOutOfScope,
 	}
 	if vars["args"] == nil {
 		vars["args"] = map[string]any{}
 	}
 	if req.Targets == nil {
 		vars["targets"] = []string{}
+	}
+	if req.OutOfScope == nil {
+		vars["out_of_scope"] = []string{}
 	}
 
 	var audited []string

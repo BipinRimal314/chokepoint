@@ -44,13 +44,19 @@ msgs = [
     # 3: blocked for WHAT IT IS — cloud instance metadata
     {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
      "params": {"name": "http_get", "arguments": {"url": "http://169.254.169.254/latest/meta-data/"}}},
+    # 4: blocked for WHERE IT GOES — reads as a path inside /srv, and is not.
+    # Nothing above matches it; the workspace boundary is what stops it, and
+    # only because containment is tested on the resolved resource.
+    {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+     "params": {"name": "read_file", "arguments": {"path": "/srv/data/../../etc/shadow"}}},
 ]
 
-# 4..43: blocked for WHAT THEY ADD UP TO. Every one of these is an ordinary
-# read of an ordinary path, and each would be allowed on its own.
+# 5..44: blocked for WHAT THEY ADD UP TO. Every one of these is an ordinary
+# read of an ordinary path inside the workspace, and each would be allowed on
+# its own.
 tools = ["read_file", "list_dir", "grep", "stat"]
 for i in range(40):
-    msgs.append({"jsonrpc": "2.0", "id": i + 4, "method": "tools/call",
+    msgs.append({"jsonrpc": "2.0", "id": i + 5, "method": "tools/call",
                  "params": {"name": tools[i % 4],
                             "arguments": {"path": f"/srv/data/record-{i:03d}.json"}}})
 
@@ -59,9 +65,10 @@ for m in msgs:
 PY
 
 step "Policy in force"
+printf '   %s\n' "workspace: $(grep -A2 '^workspace:' examples/policy.yaml | grep '^  - ' | sed 's/^  - //' | paste -sd, -)"
 grep -E '^\s+- name:|^\s+effect:' examples/policy.yaml | sed 's/^/   /'
 
-step "Running the session (44 requests through the proxy)"
+step "Running the session (45 requests through the proxy)"
 ./chokepoint --policy examples/policy.yaml --log-level warn \
   -- python3 testdata/mock_mcp_server.py \
   < "$WORK/requests.jsonl" > "$WORK/responses.jsonl" 2> "$WORK/proxy.log"
@@ -124,7 +131,7 @@ for rule, n in by_rule.most_common():
 if first_sweep_block:
     rid, data = first_sweep_block
     print()
-    print(f"   The sweep was stopped at request #{rid}. Requests 4 through {rid - 1}")
+    print(f"   The sweep was stopped at request #{rid}. Requests 5 through {rid - 1}")
     print("   were allowed: individually they are ordinary reads. What changed is")
     print("   the shape of the session, not the shape of any one call.")
     print()
