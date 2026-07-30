@@ -26,8 +26,8 @@ from something failing. It shows three kinds of refusal — two calls refused fo
 *what they are* (an SSH key, cloud instance metadata), one for *where it goes*
 (a path that reads as inside the workspace and resolves outside it), and a
 40-call sweep stopped for *what it adds up to* — with the score and its
-breakdown printed, then the same run repeated twice more: once as a session
-report, once with metrics scraped live.
+breakdown printed, then the same run repeated three times more: as a session
+report, as an evidence log, and with metrics scraped live.
 
 ## Why this exists
 
@@ -72,6 +72,9 @@ Every call it blocks is, on its own, an ordinary read of an ordinary path.
 - **A session report, not just a score.** `--report` prints where the session
   went, what it was denied for, and how it sat relative to its workspace — the
   part a reviewer can act on. See [The session report](#the-session-report).
+- **An evidence log.** `--audit-log` appends every decision as OTLP/JSON with
+  the OTel GenAI semantic conventions, ingestible by compliance tooling as-is.
+  See [Compliance evidence](#compliance-evidence).
 
 ## Policy
 
@@ -294,6 +297,58 @@ Three things it deliberately will not do:
 Tables are bounded (10 groups each from the CLI), because the session most
 worth reporting on is exactly the one with thousands of groups.
 
+## Compliance evidence
+
+`--audit-log` appends every tool-call decision to a file as OTLP/JSON spans,
+one per line:
+
+```bash
+chokepoint --policy policy.yaml --audit-log decisions.jsonl \
+  -- npx -y @modelcontextprotocol/server-filesystem /srv
+```
+
+The format is deliberate. Records carry the **OTel GenAI semantic conventions**
+(`gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`) alongside
+chokepoint's own attributes, so the log is readable by tooling that never heard
+of this project rather than a bespoke format needing its own parser. The
+attribute set has one definition shared with the trace exporter, so a span and
+an evidence record cannot describe the same decision differently.
+
+Verified against [ai-trace-auditor](https://github.com/BipinRimal314/ai-trace-auditor):
+a 30-call demo session ingests as **one trace, 30 spans, all classified as tool
+calls**, and produces a clause-level gap report against the EU AI Act, ISO
+42001, NIST AI RMF and SOC 2. chokepoint produces the runtime evidence; the
+auditor turns it into the artefact.
+
+What that does and does not mean: the auditor scores *trace field coverage* —
+which required fields are present in the log — not legal compliance, which needs
+organisational measures and review that no log can supply. What an inline proxy
+does contribute is the runtime half that after-the-fact tooling cannot: NIST AI
+RMF **MANAGE 2.4** asks for a mechanism to deactivate a system behaving
+inconsistently with its intended use, and EU AI Act **Art 14** for oversight
+able to intercept or halt at runtime. A deterministic blocking decision, logged,
+is evidence for those in a way a monitor that only describes what already
+happened is not.
+
+Three properties the log is built for:
+
+- **Append-only, flushed per record.** A process that dies mid-session still
+  leaves everything it decided up to that point. The file is opened with
+  `O_APPEND` and never truncated, so a restart does not erase the history.
+- **Absent facts are omitted, not zeroed.** No `decomposition_score` on a
+  session too short to have one; no scope attributes where no workspace was
+  declared. A recorded `0.0` would assert that the session was measured and
+  found unremarkable.
+- **Decisions, not outcomes.** It records what was permitted and refused, which
+  is what an audit asks. Whether the upstream then succeeded lives in the traces
+  and metrics; correlating it here would mean holding records open and writing
+  them out of order, costing the append-only property that makes the log worth
+  trusting.
+
+It inherits the sensitivity of what it records — targets are file paths,
+hostnames and query strings. Treat it as being as confidential as the data the
+agent was working on.
+
 ## Telemetry
 
 Both subsystems are off by default and independently switchable.
@@ -403,6 +458,7 @@ internal/detect     UBFS features, decomposition scoring, resource normalisation
                     and workspace containment
 internal/gateway    joins the three; the only package that knows MCP shapes,
                     and renders the session report
+internal/audit      canonical decision attributes + OTLP/JSON evidence log
 ```
 
 Two decisions worth calling out:

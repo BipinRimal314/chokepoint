@@ -483,3 +483,24 @@ func TestMultiTargetCallIsDeniedOnAnyTarget(t *testing.T) {
 		t.Errorf("outOfScope = %v, want just the out-of-bounds target", out)
 	}
 }
+
+// TestObserversFanOutToAll pins the reason Observers exists: traces and an
+// evidence log are different subsystems, and one must not be reachable only by
+// turning the other off.
+func TestObserversFanOutToAll(t *testing.T) {
+	a, b := &recordingObserver{}, &recordingObserver{}
+	g := New(Options{
+		Detector: detect.NewSession(detect.Config{}),
+		Observer: Observers{a, b},
+	})
+
+	intercept(t, g, toolCall(t, 1, "read_file", map[string]any{"path": "/srv/a"}))
+
+	if len(a.decisions) != 1 || len(b.decisions) != 1 {
+		t.Errorf("fan-out reached %d and %d observers' decisions, want 1 each",
+			len(a.decisions), len(b.decisions))
+	}
+	if a.decisions[0].Tool != "read_file" || b.decisions[0].Tool != "read_file" {
+		t.Error("observers did not receive the same event")
+	}
+}

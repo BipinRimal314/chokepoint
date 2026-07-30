@@ -37,6 +37,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/BipinRimal314/chokepoint/internal/audit"
 	"github.com/BipinRimal314/chokepoint/internal/gateway"
 	"github.com/BipinRimal314/chokepoint/internal/policy"
 )
@@ -305,22 +306,12 @@ func (t *Telemetry) ToolCallDecided(ev gateway.DecisionEvent) {
 		t.metrics.sessionTargets.Set(float64(ev.SessionTargets))
 	}
 
-	attrs := []attribute.KeyValue{
-		attribute.String("mcp.tool.name", ev.Tool),
-		attribute.String("mcp.method", ev.Method),
-		attribute.String("chokepoint.policy.effect", string(ev.Effect)),
-		attribute.Int("chokepoint.session.calls", ev.SessionCalls),
-		attribute.Int("chokepoint.session.targets", ev.SessionTargets),
-	}
-	if ev.Rule != "" {
-		attrs = append(attrs, attribute.String("chokepoint.policy.rule", ev.Rule))
-	}
-	if len(ev.Targets) > 0 {
-		attrs = append(attrs, attribute.StringSlice("chokepoint.targets", ev.Targets))
-	}
-	if !ev.ScoreUnavailable {
-		attrs = append(attrs, attribute.Float64("chokepoint.decomposition.score", ev.Score))
-	}
+	// Built from the same definition the audit log uses, so a span and an
+	// evidence record cannot end up describing the same decision differently.
+	// It also puts the OTel GenAI semantic conventions on the span, which is
+	// what lets a consumer that never heard of chokepoint recognise this as a
+	// tool call rather than an opaque operation.
+	attrs := otelAttrs(audit.Attributes(ev))
 
 	_, span := t.tracer.Start(context.Background(), "mcp.tool_call",
 		trace.WithSpanKind(trace.SpanKindClient),

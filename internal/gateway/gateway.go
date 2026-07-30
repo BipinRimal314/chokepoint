@@ -85,6 +85,27 @@ type Observer interface {
 	ToolCallCompleted(CompletionEvent)
 }
 
+// Observers fans one event out to several observers, in order.
+//
+// A deployment can want traces and an evidence log at once, and they are
+// different subsystems with different failure modes — one must not be reachable
+// only by turning the other off.
+type Observers []Observer
+
+// ToolCallDecided implements Observer.
+func (o Observers) ToolCallDecided(e DecisionEvent) {
+	for _, obs := range o {
+		obs.ToolCallDecided(e)
+	}
+}
+
+// ToolCallCompleted implements Observer.
+func (o Observers) ToolCallCompleted(e CompletionEvent) {
+	for _, obs := range o {
+		obs.ToolCallCompleted(e)
+	}
+}
+
 // Options configure a Gateway.
 type Options struct {
 	Policy   *policy.Policy

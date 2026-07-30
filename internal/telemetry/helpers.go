@@ -4,6 +4,9 @@ import (
 	"net"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/BipinRimal314/chokepoint/internal/audit"
 )
 
 // factory registers each collector as it is built.
@@ -52,4 +55,31 @@ func (f factory) histogramVec(opts prometheus.HistogramOpts, labels []string) *p
 // after startup has already reported success.
 func netListen(addr string) (net.Listener, error) {
 	return net.Listen("tcp", addr)
+}
+
+// otelAttrs converts the canonical attribute set into OTel key-values.
+//
+// The definition lives in the audit package because both the trace exporter and
+// the evidence log build from it; this is only the translation into the
+// exporter's types.
+func otelAttrs(attrs []audit.Attr) []attribute.KeyValue {
+	out := make([]attribute.KeyValue, 0, len(attrs))
+	for _, a := range attrs {
+		switch v := a.Value.(type) {
+		case string:
+			out = append(out, attribute.String(a.Key, v))
+		case bool:
+			out = append(out, attribute.Bool(a.Key, v))
+		case int:
+			out = append(out, attribute.Int(a.Key, v))
+		case float64:
+			out = append(out, attribute.Float64(a.Key, v))
+		case []string:
+			// Targets land here. They are unbounded and attacker-influenced,
+			// which is exactly why they belong on a span and never on a metric
+			// label — see TestTargetsAreNeverMetricLabels.
+			out = append(out, attribute.StringSlice(a.Key, v))
+		}
+	}
+	return out
 }

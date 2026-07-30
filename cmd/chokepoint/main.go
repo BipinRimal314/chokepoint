@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BipinRimal314/chokepoint/internal/audit"
 	"github.com/BipinRimal314/chokepoint/internal/detect"
 	"github.com/BipinRimal314/chokepoint/internal/gateway"
 	"github.com/BipinRimal314/chokepoint/internal/policy"
@@ -44,6 +45,7 @@ type config struct {
 	logLevel     string
 	metricsAddr  string
 	otlpEndpoint string
+	auditLog     string
 	report       bool
 	showVersion  bool
 	upstream     []string
@@ -77,6 +79,7 @@ options:
   --metrics-addr A  serve Prometheus metrics on A, e.g. :9090 (default off)
   --otlp-endpoint E export OTLP/gRPC traces to E, e.g. localhost:4317 (default off)
   --log-level LEVEL debug, info, warn, error (default info)
+  --audit-log PATH  append tool-call decisions to PATH as OTLP/JSON lines
   --report          print a session report to stderr on exit (default off)
   --version         print version and exit
 
@@ -117,6 +120,8 @@ func parseArgs(args []string) (config, error) {
 			cfg.metricsAddr, err = next()
 		case "--otlp-endpoint":
 			cfg.otlpEndpoint, err = next()
+		case "--audit-log":
+			cfg.auditLog, err = next()
 		case "--report":
 			cfg.report = true
 		case "--version", "-v":
@@ -187,7 +192,29 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var observer gateway.Observer
+	var observers gateway.Observers
+
+	if cfg.auditLog != "" {
+		// Appended to, never truncated: an audit log that a restart erases is
+		// not an audit log. Opened before the upstream starts so a path that
+		// cannot be written is a refusal to run rather than a session that
+		// silently records nothing.
+		f, err := os.OpenFile(cfg.auditLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("audit log: %w", err)
+		}
+		defer func() {
+			if err := f.Close(); err != nil {
+				logger.Warn("closing audit log", "error", err)
+			}
+		}()
+		aw := audit.New(f, audit.Options{
+			OnError: func(err error) { logger.Error("audit log write failed", "error", err) },
+		})
+		observers = append(observers, aw)
+		logger.Info("audit log open", "path", cfg.auditLog, "trace_id", aw.TraceID())
+	}
+
 	if cfg.metricsAddr != "" || cfg.otlpEndpoint != "" {
 		tel, err := telemetry.New(ctx, telemetry.Options{
 			ServiceName:  "chokepoint",
@@ -203,7 +230,7 @@ func run(cfg config) error {
 			// failure at startup.
 			return fmt.Errorf("telemetry: %w", err)
 		}
-		observer = tel
+		observers = append(observers, tel)
 		defer func() {
 			// A fresh context: the run context is already cancelled by the
 			// time this runs, and an exporter given a dead context flushes
@@ -243,9 +270,11 @@ func run(cfg config) error {
 			Window:   cfg.window,
 			MaxCalls: cfg.maxCalls,
 		}),
-		Scope:    scope,
-		Logger:   logger,
-		Observer: observer,
+		Scope:  scope,
+		Logger: logger,
+		// Nil rather than an empty slice when nothing is configured, so the
+		// gateway's "no observer" fast path still applies.
+		Observer: observerOrNil(observers),
 	})
 
 	session := proxy.NewSession(proxy.Streams{
@@ -307,4 +336,12 @@ func newLogger(level string) *slog.Logger {
 	// Logs go to stderr without exception: stdout carries the MCP protocol
 	// stream, and one stray log line there corrupts the session.
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+}
+
+// observerOrNil keeps the gateway's nil-observer fast path reachable.
+func observerOrNil(o gateway.Observers) gateway.Observer {
+	if len(o) == 0 {
+		return nil
+	}
+	return o
 }

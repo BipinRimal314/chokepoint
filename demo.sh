@@ -145,10 +145,27 @@ step "The same run, as a report"
 # The score says a number. The report says where the session actually went,
 # which is the part a reviewer can act on -- and the part that separates a
 # repository scan from an exfiltration crawl, since those score identically.
-./chokepoint --policy examples/policy.yaml --report --log-level error \
+./chokepoint --policy examples/policy.yaml --report --audit-log "$WORK/audit.jsonl" \
+  --log-level error \
   -- python3 testdata/mock_mcp_server.py \
   < "$WORK/requests.jsonl" > /dev/null 2> "$WORK/report.txt" || true
 sed 's/^/   /' "$WORK/report.txt"
+
+step "The same run, as evidence"
+# OTLP/JSON spans, one per line, carrying the OTel GenAI semantic conventions --
+# so the log is readable by compliance tooling that never heard of chokepoint,
+# rather than a bespoke format needing its own parser.
+printf '   %s decisions recorded in audit.jsonl\n\n' "$(wc -l < "$WORK/audit.jsonl" | tr -d ' ')"
+python3 -c "
+import json,sys
+rec = json.loads(open(sys.argv[1]).readline())
+attrs = {a['key']: list(a['value'].values())[0] for a in rec['attributes']}
+print('   first record:')
+for k in ('gen_ai.operation.name','gen_ai.tool.name','chokepoint.policy.effect',
+          'chokepoint.policy.rule','chokepoint.scope.out_of_scope'):
+    if k in attrs: print(f'     {k:<34} {attrs[k]}')
+print(f\"     {'status':<34} {rec.get('status',{}).get('message','ok')}\")
+" "$WORK/audit.jsonl"
 
 step "The same run, with metrics"
 ./chokepoint --policy examples/policy.yaml --metrics-addr 127.0.0.1:9464 --log-level error \
