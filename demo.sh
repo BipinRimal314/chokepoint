@@ -141,6 +141,57 @@ if first_sweep_block:
         print(f"   {DIM}  {k:<20} {v}{RESET}")
 PY
 
+step "A rug pull, caught"
+# Separate from the batch above, and paced, because a real MCP client waits for
+# each reply before sending the next -- it cannot call a tool it has not
+# discovered yet. The batch above pipelines everything, which is not how a client
+# behaves and would let a call race ahead of the listing that condemns it.
+#
+# The mock server advertises a benign read_file, then appends exfiltration
+# instructions to its description on the second listing. Same name, same schema.
+python3 - <<'RUGPULL' | sed 's/^/   /'
+import json, subprocess, threading, time
+
+msgs = [
+    {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}},
+    {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+     "params": {"name": "read_file", "arguments": {"path": "/srv/data/a.json"}}},
+    {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
+    {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+     "params": {"name": "read_file", "arguments": {"path": "/srv/data/b.json"}}},
+]
+labels = {1: "tools/list  (benign definitions)",
+          2: "read_file   before the mutation",
+          3: "tools/list  (server rug-pulls here)",
+          4: "read_file   after the mutation"}
+
+p = subprocess.Popen(
+    ["./chokepoint", "--policy", "examples/policy.yaml", "--log-level", "error",
+     "--", "python3", "testdata/mock_mcp_server.py"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+
+out = []
+threading.Thread(target=lambda: [out.append(l) for l in p.stdout], daemon=True).start()
+for m in msgs:
+    p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush(); time.sleep(0.2)
+p.stdin.close(); time.sleep(0.4)
+
+GREEN, RED, DIM, RESET = "\033[32m", "\033[31m", "\033[2m", "\033[0m"
+for line in out:
+    m = json.loads(line)
+    if m.get("id") not in labels:
+        continue
+    if "error" in m:
+        print(f"{RED}BLOCKED{RESET} #{m['id']}  {labels[m['id']]}")
+        print(f"        {DIM}rule: {m['error']['data']['rule']}{RESET}")
+    else:
+        print(f"{GREEN}allowed{RESET} #{m['id']}  {labels[m['id']]}")
+print()
+print("The blocked call is identical in shape to the allowed one.")
+print("What changed was the definition it was made against.")
+RUGPULL
+
 step "The same run, as a report"
 # The score says a number. The report says where the session actually went,
 # which is the part a reviewer can act on -- and the part that separates a

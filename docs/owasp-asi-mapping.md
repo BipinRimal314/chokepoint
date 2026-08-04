@@ -10,7 +10,7 @@ Threats and Mitigations* material used a different taxonomy, and several
 familiar names (*Excessive Agency*, *Cascading Hallucinations*, *Inadequate
 Sandboxing*) either moved identifier or are not in the Top 10 at all.
 
-**This is a control mapping, not a compliance claim.** Four of ten are
+**This is a control mapping, not a compliance claim.** Five of ten are
 addressed to any real degree. That is what a proxy in one position on one
 protocol can do, and a mapping that claimed more would be less useful.
 
@@ -19,7 +19,7 @@ protocol can do, and a mapping that claimed more would be less useful.
 | ASI01 | Agent Goal Hijack | **Partial** — constrains a hijacked agent; cannot see the hijack |
 | ASI02 | Tool Misuse | **Enforced** — the project's primary control |
 | ASI03 | Identity & Privilege Abuse | Not addressed — no identity layer under stdio |
-| ASI04 | Agentic Supply Chain Vulnerabilities | Not addressed — **the cheapest real gap** |
+| ASI04 | Agentic Supply Chain Vulnerabilities | **Partial** — rug pulls caught; the rest of the chain is not |
 | ASI05 | Unexpected Code Execution | **Partial** — expressible in policy, not built in |
 | ASI06 | Memory & Context Poisoning | **Partial** — constrains where context is read from |
 | ASI07 | Insecure Inter-Agent Communication | Out of architecture — one agent, one server |
@@ -72,18 +72,45 @@ genuinely proxy-enforceable. Both are on the roadmap; neither is built.
 
 ## ASI04 — Agentic Supply Chain Vulnerabilities
 
-**Not addressed, and this is the cheapest real gap in the list.**
+**Partial — the rug pull is caught; the rest of the supply chain is not.**
 
-The rug-pull case — a server that advertises benign tool definitions, is
-approved, then mutates them — is squarely in a proxy's reach. chokepoint sees
-every `tools/list` response cross the wire and currently forwards them without
-inspection. Fingerprinting tool definitions on first sight and refusing or
-alerting when they change afterwards needs no new position, no new transport,
-and no new protocol support.
+An earlier version of this document recorded ASI04 as the cheapest unbuilt gap
+in the list, on the grounds that `tools/list` responses already cross the proxy
+and were being forwarded without inspection. That is now implemented.
 
-Recorded here as a gap rather than quietly omitted, because someone reading a
-control mapping deserves to know which absences are architectural and which are
-merely unbuilt. This one is merely unbuilt.
+Every advertised tool definition is fingerprinted on first sight and compared on
+every later listing. A definition that changes mid-session — the rug pull, where
+a server is approved benign and then mutates a description or widens a schema —
+is reported to policy as `tool_definition_changed`, and the example policy
+denies calls to a tool that has changed.
+
+Three properties worth knowing:
+
+- **Comparison is against the first listing, not the previous one**, so a server
+  cannot launder a mutation by changing a definition and changing it back.
+- **The whole definition is hashed**, not a chosen subset. A rug pull can hide
+  in the description, the schema, an annotation, or a field this build has never
+  heard of; picking fields to hash would be picking which mutations to miss.
+- **Key order is not a change; array order is.** A server that re-serialises its
+  tool list differently has not mutated anything, and a check that cried wolf
+  there would be turned off within a day.
+
+What it does not do. First sight is the baseline, because a proxy cannot know
+what an operator approved — only what the server said first. That makes this
+"has this changed under us", not "is this what was reviewed", which is weaker
+and is the honest description of what the position affords. It also says nothing
+about the rest of the agentic supply chain: a server that is malicious from its
+very first listing is not a rug pull and is not caught here, and neither is a
+compromised dependency inside an otherwise honest server.
+
+One ordering limit, recorded rather than fixed: the flag is set when the
+`tools/list` **reply** is processed, so a client that pipelines a call ahead of
+that reply is judged against the definitions seen so far. A conforming MCP
+client cannot do this — it cannot call a tool it has not discovered — but a
+batch harness can, and this project's own demo did until it was paced.
+`TestFingerprintCheckNeedsTheListingFirst` pins the behaviour. Holding calls
+until in-flight listings resolve would put a stall in the request path of every
+session to defend against a client attacking itself.
 
 ## ASI05 — Unexpected Code Execution
 

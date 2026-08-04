@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/BipinRimal314/chokepoint/internal/detect"
+	"github.com/BipinRimal314/chokepoint/internal/inventory"
 	"github.com/BipinRimal314/chokepoint/internal/jsonrpc"
 	"github.com/BipinRimal314/chokepoint/internal/policy"
 	"github.com/BipinRimal314/chokepoint/internal/proxy"
@@ -23,6 +24,7 @@ import (
 // MCP method names the gateway treats specially.
 const (
 	methodToolsCall     = "tools/call"
+	methodToolsList     = "tools/list"
 	methodResourcesRead = "resources/read"
 	methodPromptsGet    = "prompts/get"
 )
@@ -61,6 +63,12 @@ type DecisionEvent struct {
 	OutOfScope int
 	// SessionOutOfScope is distinct out-of-scope resources touched so far.
 	SessionOutOfScope int
+
+	// ToolDefinitionChanged is true when this tool's advertised definition has
+	// changed since the session's first tools/list.
+	ToolDefinitionChanged bool
+	// SessionToolsChanged is how many distinct tools have changed so far.
+	SessionToolsChanged int
 }
 
 // CompletionEvent reports the upstream's answer to a forwarded call.
@@ -118,9 +126,12 @@ type Options struct {
 	//
 	// The zero Scope is undeclared: scope facts stay false and empty, and rules
 	// guarding on scope_declared do not fire.
-	Scope    detect.Scope
-	Logger   *slog.Logger
-	Observer Observer
+	Scope detect.Scope
+	// Inventory fingerprints advertised tool definitions and reports mutation.
+	// Nil disables the check entirely, including the policy variables it feeds.
+	Inventory *inventory.Registry
+	Logger    *slog.Logger
+	Observer  Observer
 }
 
 // Gateway implements proxy.Interceptor.
@@ -132,6 +143,11 @@ type Gateway struct {
 	// can be attributed when it arrives. MCP responses carry no method name,
 	// so without this the reply to a tool call is anonymous.
 	pending map[string]pendingCall
+	// listings holds the ids of in-flight tools/list requests, so the response
+	// carrying the tool definitions can be recognised. MCP responses carry no
+	// method name, so without this a tools/list result is indistinguishable
+	// from any other result.
+	listings map[string]struct{}
 	// denials counts refusals by rule name, for the session report. Kept here
 	// rather than recomputed from the detector because a denied call is not
 	// distinguishable from an allowed one in the observation stream — the
@@ -152,10 +168,14 @@ func New(opts Options) *Gateway {
 	if opts.Weights == (detect.Weights{}) {
 		opts.Weights = detect.DefaultWeights()
 	}
+	if opts.Inventory == nil {
+		opts.Inventory = inventory.NewRegistry()
+	}
 	return &Gateway{
-		opts:    opts,
-		pending: make(map[string]pendingCall),
-		denials: make(map[string]int),
+		opts:     opts,
+		pending:  make(map[string]pendingCall),
+		listings: make(map[string]struct{}),
+		denials:  make(map[string]int),
 	}
 }
 
@@ -168,6 +188,7 @@ type toolCallParams struct {
 // Intercept implements proxy.Interceptor.
 func (g *Gateway) Intercept(_ context.Context, dir proxy.Direction, msg *jsonrpc.Message) (proxy.Interception, error) {
 	if dir == proxy.ServerToClient {
+		g.inspectToolListing(msg)
 		g.completeResponse(msg)
 		return proxy.Interception{Decision: proxy.Forward}, nil
 	}
@@ -192,6 +213,12 @@ func (g *Gateway) inspectRequest(msg *jsonrpc.Message) (proxy.Interception, erro
 			IsToolCall:   false,
 			At:           time.Now(),
 		})
+		return proxy.Interception{Decision: proxy.Forward}, nil
+
+	case methodToolsList:
+		// Not gated — an agent has to be able to discover its tools — but the
+		// id is remembered so the definitions in the reply can be fingerprinted.
+		g.trackListing(msg)
 		return proxy.Interception{Decision: proxy.Forward}, nil
 
 	default:
@@ -240,6 +267,9 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 		ScopeDeclared:      scope.Declared,
 		OutOfScope:         outOfScope,
 		SessionOutOfScope:  scope.Distinct,
+
+		ToolDefinitionChanged: g.opts.Inventory.Changed(params.Name),
+		SessionToolsChanged:   g.opts.Inventory.ChangedCount(),
 	})
 
 	if g.opts.Observer != nil {
@@ -259,6 +289,9 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 			ScopeDeclared:     scope.Declared,
 			OutOfScope:        len(outOfScope),
 			SessionOutOfScope: scope.Distinct,
+
+			ToolDefinitionChanged: g.opts.Inventory.Changed(params.Name),
+			SessionToolsChanged:   g.opts.Inventory.ChangedCount(),
 		})
 	}
 
@@ -327,6 +360,62 @@ func (g *Gateway) recordDenial(rule string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.denials[rule]++
+}
+
+// trackListing remembers a tools/list request id.
+func (g *Gateway) trackListing(msg *jsonrpc.Message) {
+	key := msg.IDKey()
+	if key == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.listings[key] = struct{}{}
+}
+
+// toolListResult is the shape of a tools/list reply. Tools stay as raw JSON so
+// the fingerprint covers fields this build has never heard of.
+type toolListResult struct {
+	Tools []json.RawMessage `json:"tools"`
+}
+
+// inspectToolListing fingerprints the definitions in a tools/list reply.
+//
+// The reply is always forwarded. Refusing it would break discovery for an agent
+// that has done nothing wrong yet, and the mutation has already happened by the
+// time it is visible — the useful moment to act is the next call to the tool
+// that changed, which is where policy gets to decide.
+func (g *Gateway) inspectToolListing(msg *jsonrpc.Message) {
+	key := msg.IDKey()
+	if key == "" || len(msg.Result) == 0 {
+		return
+	}
+
+	g.mu.Lock()
+	_, isListing := g.listings[key]
+	delete(g.listings, key)
+	g.mu.Unlock()
+	if !isListing {
+		return
+	}
+
+	var result toolListResult
+	if err := json.Unmarshal(msg.Result, &result); err != nil {
+		g.opts.Logger.Debug("tools/list result did not decode", "error", err)
+		return
+	}
+
+	for _, change := range g.opts.Inventory.Observe(result.Tools) {
+		// Warn, not Info: a definition changing under a running session is the
+		// rug pull this check exists for, and it is the operator's only notice.
+		g.opts.Logger.Warn("tool definition changed since first listing",
+			"tool", change.Tool,
+			"kind", string(change.Kind),
+			"listing", change.Listing,
+			"was", change.Was,
+			"now", change.Now,
+		)
+	}
 }
 
 func (g *Gateway) trackPending(msg *jsonrpc.Message, tool string) {

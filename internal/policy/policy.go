@@ -103,6 +103,13 @@ type Request struct {
 	// has touched. Distinct rather than counted, so one path retried thirty
 	// times is not thirty places.
 	SessionOutOfScope int
+	// ToolDefinitionChanged is true when the tool being called has advertised a
+	// different definition since the session's first tools/list. This is the
+	// rug pull: approved benign, mutated afterwards.
+	ToolDefinitionChanged bool
+	// SessionToolsChanged is how many distinct tools have been modified or
+	// added since the first listing.
+	SessionToolsChanged int
 }
 
 // Decision is the outcome of evaluating a policy.
@@ -130,6 +137,8 @@ func declarations() []cel.EnvOption {
 		cel.Variable("session_calls", cel.IntType),
 		cel.Variable("session_targets", cel.IntType),
 		cel.Variable("decomposition_score", cel.DoubleType),
+		cel.Variable("tool_definition_changed", cel.BoolType),
+		cel.Variable("session_tools_changed", cel.IntType),
 		cel.Variable("scope_declared", cel.BoolType),
 		cel.Variable("out_of_scope", cel.ListType(cel.StringType)),
 		cel.Variable("session_out_of_scope", cel.IntType),
@@ -213,6 +222,9 @@ func (p *Policy) Evaluate(req Request) Decision {
 		"session_calls":       req.SessionCalls,
 		"session_targets":     req.SessionTargets,
 		"decomposition_score": req.DecompositionScore,
+
+		"tool_definition_changed": req.ToolDefinitionChanged,
+		"session_tools_changed":   req.SessionToolsChanged,
 
 		"scope_declared":       req.ScopeDeclared,
 		"out_of_scope":         req.OutOfScope,

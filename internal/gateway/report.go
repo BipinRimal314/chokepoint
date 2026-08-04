@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/BipinRimal314/chokepoint/internal/detect"
+	"github.com/BipinRimal314/chokepoint/internal/inventory"
 )
 
 // SessionReport is everything the gateway knows about a finished session, in
@@ -33,14 +34,19 @@ type SessionReport struct {
 	Scope detect.ScopeReport
 	// Denials counts calls refused, by rule name.
 	Denials map[string]int
+	// ToolChanges are tool definitions that changed after the session's first
+	// tools/list. Reported before anything else, because a mutated definition
+	// re-frames every call made after it.
+	ToolChanges []inventory.Change
 }
 
 // SessionReport gathers the current state of the session.
 func (g *Gateway) SessionReport() SessionReport {
 	rep := SessionReport{
-		Assessment: g.assess(),
-		Scope:      g.scopeReport(),
-		Denials:    g.denialCounts(),
+		Assessment:  g.assess(),
+		Scope:       g.scopeReport(),
+		Denials:     g.denialCounts(),
+		ToolChanges: g.opts.Inventory.Changes(),
 	}
 	if g.opts.Detector != nil {
 		rep.Resources = g.opts.Detector.ResourceSummary()
@@ -71,6 +77,16 @@ func (r SessionReport) Render(w io.Writer, limit int) error {
 	var b strings.Builder
 
 	b.WriteString("chokepoint session report\n\n")
+
+	// First, because it changes how everything below should be read.
+	if len(r.ToolChanges) > 0 {
+		fmt.Fprintf(&b, "  !! %d tool definition(s) changed after the first listing\n",
+			len(r.ToolChanges))
+		for _, c := range r.ToolChanges {
+			fmt.Fprintf(&b, "     %s\n", c)
+		}
+		b.WriteString("\n")
+	}
 
 	fmt.Fprintf(&b, "  %d calls carried a resource, %d distinct\n",
 		r.Resources.Calls, r.Resources.Distinct)

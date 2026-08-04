@@ -12,6 +12,8 @@
 #   session_calls         int      calls made in this session
 #   session_targets       int      distinct targets touched this session
 #   decomposition_score   double   UBFS decomposition score, 0.0-1.0
+#   tool_definition_changed  bool  this tool changed since the first tools/list
+#   session_tools_changed    int   distinct tools changed since the first listing
 #   scope_declared        bool     whether `workspace` below is non-empty
 #   out_of_scope          list     this call's targets outside the workspace
 #   session_out_of_scope  int      distinct out-of-scope resources this session
@@ -39,6 +41,23 @@ rules:
   - name: watch-writes
     match: tool.startsWith("write") || tool.startsWith("delete")
     effect: audit
+
+  # The rug pull: a server advertises benign tools, gets approved, then mutates
+  # a definition afterwards. The agent re-reads the list, finds new instructions
+  # in a description or a widened schema, and acts on them. The call that
+  # follows looks entirely normal — it matches what the server now advertises —
+  # which is why no amount of behavioural scoring sees it.
+  #
+  # Definitions are fingerprinted against the session's FIRST listing, so a
+  # server cannot launder a mutation by changing a definition and changing it
+  # back. Key order is not a change; array order is.
+  - name: tool-definition-changed
+    match: tool_definition_changed
+    effect: deny
+    message: >-
+      This tool's definition has changed since this session started. That is
+      the signature of a tool-poisoning attack. Stop and have an operator
+      re-approve the server before using it again.
 
   # Individually legitimate calls, blocked for what they add up to. This is
   # the rule the project exists for: the failure mode the threat-to-governance

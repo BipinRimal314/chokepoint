@@ -75,6 +75,10 @@ Every call it blocks is, on its own, an ordinary read of an ordinary path.
 - **An evidence log.** `--audit-log` appends every decision as OTLP/JSON with
   the OTel GenAI semantic conventions, ingestible by compliance tooling as-is.
   See [Compliance evidence](#compliance-evidence).
+- **Tool definitions are fingerprinted.** Every `tools/list` is compared against
+  the session's first, so a server that is approved benign and then mutates a
+  description — the rug pull — is caught on the next call. See
+  [Tool-definition fingerprinting](#tool-definition-fingerprinting).
 
 ## Policy
 
@@ -104,6 +108,8 @@ Variables available to `match`:
 | `session_calls` | int | calls made this session |
 | `session_targets` | int | distinct targets touched this session |
 | `decomposition_score` | double | UBFS decomposition score, 0.0–1.0 |
+| `tool_definition_changed` | bool | this tool changed since the first `tools/list` |
+| `session_tools_changed` | int | distinct tools changed since the first listing |
 | `scope_declared` | bool | whether a `workspace` was declared |
 | `out_of_scope` | list\<string\> | this call's targets outside the workspace |
 | `session_out_of_scope` | int | distinct out-of-scope resources this session |
@@ -240,6 +246,52 @@ Read the mitigation for exactly what it is. It requires an operator who can
 declare where the agent belongs, it says nothing about a sweep confined to the
 workspace, and it does not repair the score — the defect above is still there,
 underneath it.
+
+## Tool-definition fingerprinting
+
+A server advertises benign tools, gets approved, and then changes one. The agent
+re-reads the list, finds new instructions inside a description or a widened
+schema, and acts on them. The call that follows is unremarkable — it matches
+what the server now advertises — which is exactly why scoring the call stream
+cannot see it, and why the check has to be on the definitions.
+
+Every `tools/list` reply is fingerprinted and compared against the session's
+first. A tool that has changed is reported to policy:
+
+```yaml
+- name: tool-definition-changed
+  match: tool_definition_changed
+  effect: deny
+```
+
+```
+allowed #1  tools/list  (benign definitions)
+allowed #2  read_file   before the mutation
+allowed #3  tools/list  (server rug-pulls here)
+BLOCKED #4  read_file   after the mutation
+        rule: tool-definition-changed
+```
+
+The blocked call is identical in shape to the allowed one. What changed was the
+definition it was made against. `./demo.sh` runs this against the real binary.
+
+- **Compared against the first listing, not the previous one** — a server cannot
+  launder a mutation by changing a definition and changing it back.
+- **The whole definition is hashed.** Description, schema, annotations, and
+  fields this build has never heard of. Choosing which fields to hash would be
+  choosing which mutations to miss.
+- **Key order is not a change; array order is.** A server that re-serialises its
+  tool list has not mutated anything.
+- **Listings are never gated.** The mutation has already happened by the time it
+  is visible, and refusing discovery would break an agent that has done nothing
+  wrong. The useful moment is the next call to the tool that changed.
+
+Limits, stated plainly: first sight is the baseline, so this is "has this changed
+under us" rather than "is this what was reviewed" — a server malicious from its
+first listing is not a rug pull and is not caught. And the flag is set when the
+listing *reply* is processed, so a client that pipelines a call ahead of that
+reply is judged against what has been seen so far; a conforming MCP client
+cannot, but a batch harness can.
 
 ## The session report
 
@@ -452,6 +504,10 @@ exactly the over-trust the research warns about.
   multi-tool sweep gets under 0.45 at **2× call overhead**; a single-tool sweep
   pays nothing. See [Cost of evasion](#cost-of-evasion). This raises the cost of
   a decomposed attack; it does not close the class.
+- **Tool fingerprinting baselines on first sight.** A proxy cannot know what an
+  operator approved, only what the server said first, so a server that is
+  malicious from its opening listing is not a rug pull and is not caught. See
+  [Tool-definition fingerprinting](#tool-definition-fingerprinting).
 - **stdio transport only.** Streamable-HTTP and SSE are not implemented yet.
 
 ## Design
@@ -466,6 +522,7 @@ internal/detect     UBFS features, decomposition scoring, resource normalisation
 internal/gateway    joins the three; the only package that knows MCP shapes,
                     and renders the session report
 internal/audit      canonical decision attributes + OTLP/JSON evidence log
+internal/inventory  tool-definition fingerprinting and mutation detection
 ```
 
 Two decisions worth calling out:

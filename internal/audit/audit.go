@@ -60,6 +60,8 @@ const (
 	KeyScore          = "chokepoint.decomposition.score"
 	KeySessionCalls   = "chokepoint.session.calls"
 	KeySessionTargets = "chokepoint.session.targets"
+	KeyToolChanged    = "chokepoint.tool.definition_changed"
+	KeyToolsChanged   = "chokepoint.tool.session_changed"
 	KeyScopeDeclared  = "chokepoint.scope.declared"
 	KeyOutOfScope     = "chokepoint.scope.out_of_scope"
 	KeySessionOutOf   = "chokepoint.scope.session_out_of_scope"
@@ -95,6 +97,14 @@ func Attributes(ev gateway.DecisionEvent) []Attr {
 	if !ev.ScoreUnavailable {
 		attrs = append(attrs, Attr{KeyScore, ev.Score})
 	}
+	// Recorded on every decision rather than only when true: "this tool was
+	// verified unchanged at the moment of the call" is itself the evidence, and
+	// an absent attribute would not distinguish it from a build that never
+	// checked.
+	attrs = append(attrs,
+		Attr{KeyToolChanged, ev.ToolDefinitionChanged},
+		Attr{KeyToolsChanged, ev.SessionToolsChanged},
+	)
 	if ev.ScopeDeclared {
 		attrs = append(attrs,
 			Attr{KeyScopeDeclared, true},
