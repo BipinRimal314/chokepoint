@@ -206,10 +206,8 @@ func (s *Session) ResourceSummary() ResourceSummary {
 	rootSeen := make(map[string]map[string]struct{})
 
 	for i, c := range s.calls {
-		if c.Target == "" {
-			continue
-		}
-		r := ParseResource(c.Target)
+		// Normalised once at Observe; see Call.res.
+		r := c.res
 		if r.Empty() {
 			continue
 		}

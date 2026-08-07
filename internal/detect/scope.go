@@ -186,10 +186,9 @@ func (s *Session) ScopeReport(sc Scope) ScopeReport {
 	seen := make(map[string]struct{})
 
 	for i, c := range s.calls {
-		if c.Target == "" {
-			continue
-		}
-		r := ParseResource(c.Target)
+		// Observe normalised this; a call whose target named no resource is
+		// not evidence of anything and is not counted as a place.
+		r := c.res
 		if r.Empty() {
 			continue
 		}

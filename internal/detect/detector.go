@@ -25,6 +25,16 @@ type Call struct {
 	Errored bool
 	// At is when the call was observed.
 	At time.Time
+
+	// res is Target normalised, parsed once by Observe.
+	//
+	// Unexported on purpose: it is a cache, not an input. A caller who could
+	// set it could make it disagree with Target, and every containment and
+	// grouping decision in this package would then be made against a resource
+	// the tool was never called with — the exact failure normalisation exists
+	// to prevent. Deriving it at the one point calls enter the session is what
+	// makes "res always describes Target" a property rather than a convention.
+	res Resource
 }
 
 // Config tunes session accounting.
@@ -74,6 +84,12 @@ func NewSession(cfg Config) *Session {
 }
 
 // Observe records one call.
+//
+// The target is normalised here rather than at each read. Reports walk the
+// retained history repeatedly — ResourceSummary and ScopeReport each parse
+// every call they look at — so parsing per call instead of per walk moves the
+// work from O(reports x calls) to O(calls), which is what keeps a 10,000-call
+// session's report cost in the same place as the score's.
 func (s *Session) Observe(c Call) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -81,6 +97,7 @@ func (s *Session) Observe(c Call) {
 	if c.At.IsZero() {
 		c.At = time.Now()
 	}
+	c.res = ParseResource(c.Target)
 	if s.startedAt.IsZero() {
 		s.startedAt = c.At
 	}
@@ -119,12 +136,19 @@ func (s *Session) Len() int {
 }
 
 // Vector computes the UBFS observation for the current window.
+//
+// The walk happens under the lock rather than over a snapshot. Snapshotting
+// used to buy a shorter critical section, but the copy was itself O(n) under
+// the same lock and only saved the map work — and once Call carried its parsed
+// resource, copying 10,000 of them cost more than the walk it was protecting.
+// ResourceSummary and ScopeReport already walk locked; this makes the three
+// read paths agree.
 func (s *Session) Vector() *Vector {
 	s.mu.Lock()
-	calls := make([]Call, len(s.calls))
-	copy(calls, s.calls)
+	defer s.mu.Unlock()
+
+	calls := s.calls
 	started := s.startedAt
-	s.mu.Unlock()
 
 	v := NewVector()
 	if len(calls) == 0 {
