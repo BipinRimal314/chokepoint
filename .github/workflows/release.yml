@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    permissions:
+      # Creating the release and uploading its assets.
+      contents: write
+      # Keyless provenance: the workflow signs with a short-lived OIDC identity
+      # rather than a stored key, so there is no signing key to leak.
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # goreleaser builds the changelog from the log between tags, and a
+          # shallow clone silently produces an empty one.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      # CI runs on the branch, not on the tag, so nothing has yet proven this
+      # exact tree passes. Releasing an untested tag is how a broken binary
+      # gets a version number that people then pin.
+      - name: Test the tagged tree
+        run: go test -race ./...
+
+      - name: Release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Attests that these archives were built by this workflow from this
+      # commit. Verified with:
+      #   gh attestation verify <archive> --repo <owner>/<repo>
+      #
+      # This is the control chokepoint's own README asks other people to have
+      # (ASI-04, supply chain). Shipping a tool that denies tool calls without
+      # it would be an odd position to argue from.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt

@@ -85,6 +85,44 @@ jobs:
           version: latest
           install-go: false
 
+  release-config:
+    name: release config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      # The release workflow only runs on tags, so without this a broken
+      # .goreleaser.yaml is discovered at the worst possible moment: after the
+      # tag is pushed, with a half-published release to clean up. A snapshot
+      # build is the same work minus the upload.
+      - name: Validate and dry-run the release build
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean --skip=announce
+
+      - name: Every documented platform produced an archive
+        # The k3s installer reconstructs an asset name from a version and
+        # `uname -m`; if the archive template or the target list changes, that
+        # installer starts 404ing on every node and nothing here would have
+        # noticed.
+        run: |
+          for target in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
+            if ! ls dist/*_"$target".tar.gz >/dev/null 2>&1; then
+              echo "FAIL: no archive for $target"
+              exit 1
+            fi
+          done
+          ls dist/*_windows_amd64.zip >/dev/null || { echo "FAIL: no windows archive"; exit 1; }
+          echo "all documented platforms present"
+
   e2e:
     name: end-to-end
     runs-on: ubuntu-latest

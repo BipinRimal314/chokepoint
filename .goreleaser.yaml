@@ -1,0 +1,115 @@
+# Release build for tagged versions.
+#
+# The point of building releases here rather than by hand is that an operator
+# who downloads a binary can tie it back to the commit that produced it. That
+# is not decoration for a tool whose own threat model names supply chain
+# compromise: a proxy people trust to deny tool calls is worth substituting,
+# and "I built it on my laptop" is not an answer to that. Hence -trimpath,
+# a pinned mod_timestamp, a published checksums.txt, and build provenance
+# attested in the workflow.
+#
+# Validate changes without tagging anything:
+#
+#	goreleaser check
+#	goreleaser release --snapshot --clean
+
+version: 2
+
+project_name: chokepoint
+
+before:
+  hooks:
+    # Not a substitute for CI — the release workflow runs the full suite first.
+    # These catch the narrower case of a tag pushed from a tree whose go.mod
+    # drifted, which would otherwise ship a binary built from dependencies
+    # nothing tested.
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: chokepoint
+    main: ./cmd/chokepoint
+    binary: chokepoint
+    env:
+      # Static, so the binary runs unchanged in the distroless and Alpine
+      # images agents are packaged in. chokepoint has to be present inside the
+      # agent's container to intercept its stdio, so it inherits whatever libc
+      # that image has — or does not have.
+      - CGO_ENABLED=0
+    flags:
+      # Strips local build paths out of the binary. Without it every stack
+      # trace carries the absolute path of whoever built it.
+      - -trimpath
+    ldflags:
+      # --version is the only way to tell two builds apart in the field, so it
+      # has to be the tag rather than the "dev" default.
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    # Pinned to the commit, not to build time, so rebuilding a tag produces a
+    # byte-identical archive. A checksum nobody can independently reproduce is
+    # a checksum that only proves the release ran once.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: chokepoint
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # Matches what deploy/k3s/daemonset-install.yaml reconstructs from a
+    # version and `uname -m`. Changing this template breaks that installer.
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      # The example policy ships with the binary because the documented way to
+      # adopt chokepoint is to run it transparently, then start from this file.
+      - examples/policy.yaml
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Detection and enforcement
+      regexp: '^feat\(detect|^feat\(policy|^feat\(gateway|^feat\(inventory'
+      order: 0
+    - title: Evidence and telemetry
+      regexp: '^feat\(audit|^feat\(telemetry'
+      order: 1
+    - title: Other features
+      regexp: "^feat"
+      order: 2
+    - title: Fixes and performance
+      regexp: "^fix|^perf"
+      order: 3
+    - title: Documentation
+      regexp: "^docs"
+      order: 4
+  filters:
+    exclude:
+      - "^chore"
+      - "^test"
+      - "^ci"
+
+release:
+  # A tag containing a hyphen (v0.2.0-rc1) becomes a prerelease on its own.
+  prerelease: auto
+  footer: |
+    ## Verifying this release
+
+    ```sh
+    sha256sum -c checksums.txt --ignore-missing
+    gh attestation verify chokepoint_{{ .Version }}_linux_amd64.tar.gz \
+      --repo {{ .Env.GITHUB_REPOSITORY }}
+    ```
+
+    chokepoint is pre-1.0: the policy file format and the score's weights can
+    still change between minor versions. Pin a tag.
