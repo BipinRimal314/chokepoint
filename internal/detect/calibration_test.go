@@ -16,13 +16,18 @@ import (
 // guess in a deny rule is an outage waiting for the right Tuesday. The shapes
 // below are the ones an operator has to tell apart, and the numbers are what
 // the example policy's thresholds are set from.
-func TestCalibrationTable(t *testing.T) {
-	shapes := []struct {
-		name    string
-		build   func() [][2]string
-		benign  bool
-		comment string
-	}{
+// calibrationShape is one session shape and what it is meant to represent.
+// Shared so the paper-data generator emits the same six shapes this table
+// calibrates against, rather than a second copy of them that can drift.
+type calibrationShape struct {
+	name    string
+	build   func() [][2]string
+	benign  bool
+	comment string
+}
+
+func calibrationShapes() []calibrationShape {
+	return []calibrationShape{
 		{
 			name:    "poll-one-file",
 			benign:  true,
@@ -94,6 +99,10 @@ func TestCalibrationTable(t *testing.T) {
 			},
 		},
 	}
+}
+
+func TestCalibrationTable(t *testing.T) {
+	shapes := calibrationShapes()
 
 	t.Logf("%-18s %8s %8s %8s %8s %8s  %s",
 		"shape", "score", "breadth", "novelty", "entropy", "lowRep", "note")
