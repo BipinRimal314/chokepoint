@@ -1,0 +1,138 @@
+# Puts the chokepoint binary on every node.
+#
+# Read deploy/k3s/README.md before this file. The short version: chokepoint is
+# a stdio proxy, not a network service. It intercepts an MCP session by being
+# the process the agent spawns, which means it has to be inside the agent's
+# container at exec time. A standalone Deployment of chokepoint would have
+# nothing on its stdin and would proxy nothing.
+#
+# So this DaemonSet does not run chokepoint. It stages the binary on each node
+# once, and agent pods mount it read-only. This is the same shape as a CNI
+# plugin installer, and it exists for the same reason: the artefact belongs in
+# other pods, not in this one.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chokepoint-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: chokepoint-installer
+  namespace: chokepoint-system
+  labels:
+    app.kubernetes.io/name: chokepoint
+    app.kubernetes.io/component: installer
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chokepoint
+      app.kubernetes.io/component: installer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chokepoint
+        app.kubernetes.io/component: installer
+    spec:
+      # An agent pod that starts before the binary is staged fails to exec and
+      # crash-loops until it is. Node-critical keeps this ahead of the
+      # workloads that depend on it when a node is under pressure.
+      priorityClassName: system-node-critical
+      nodeSelector:
+        kubernetes.io/os: linux
+      # Nodes are tainted for reasons that have nothing to do with staging a
+      # file. If an agent can be scheduled somewhere, the binary has to be
+      # there too.
+      tolerations:
+        - operator: Exists
+
+      initContainers:
+        - name: install
+          image: alpine:3.22
+          # Root because the whole job is writing to a host directory. It is
+          # an init container so this privilege lasts seconds, not the life of
+          # the pod.
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # The tag to install, without the leading "v". Must match a
+            # published release; see .goreleaser.yaml for the asset naming.
+            - name: CHOKEPOINT_VERSION
+              value: "0.1.0"
+            - name: CHOKEPOINT_REPO
+              value: "BipinRimal314/chokepoint"
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              # Map uname's architecture names onto the ones goreleaser uses.
+              case "$(uname -m)" in
+                x86_64)  arch=amd64 ;;
+                aarch64) arch=arm64 ;;
+                *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+              esac
+
+              archive="chokepoint_${CHOKEPOINT_VERSION}_linux_${arch}.tar.gz"
+              base="https://github.com/${CHOKEPOINT_REPO}/releases/download/v${CHOKEPOINT_VERSION}"
+
+              cd "$(mktemp -d)"
+              wget -q "${base}/${archive}"
+              wget -q "${base}/checksums.txt"
+
+              # Verified before anything is unpacked, and the exit status is
+              # not swallowed. A proxy whose job is to deny tool calls is worth
+              # substituting; installing whatever the network returned would
+              # make this DaemonSet the easiest way to do it.
+              grep " ${archive}\$" checksums.txt > expected.txt
+              test -s expected.txt || {
+                echo "no checksum published for ${archive}" >&2; exit 1; }
+              sha256sum -c expected.txt
+
+              tar xzf "${archive}" chokepoint
+              chmod 0755 chokepoint
+
+              # Staged under a temporary name and renamed into place. rename(2)
+              # is atomic within a filesystem, so an agent pod exec'ing during
+              # an upgrade gets either the old binary or the new one, never a
+              # half-written file.
+              install -d -m 0755 /host/bin
+              cp chokepoint /host/bin/.chokepoint.tmp
+              mv -f /host/bin/.chokepoint.tmp /host/bin/chokepoint
+
+              /host/bin/chokepoint --version
+          volumeMounts:
+            - name: host-bin
+              mountPath: /host/bin
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+
+      containers:
+        # The install already happened. A DaemonSet still needs something to
+        # keep running, and pause is the cheapest thing that does nothing —
+        # a shell sleeping in a loop would cost more and could fail.
+        #
+        # Keeping the pod alive is not busywork: it is what makes the install
+        # reconcile. The pod is recreated on node reboot and on any change to
+        # CHOKEPOINT_VERSION, and the init container re-runs each time.
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65535
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 1m, memory: 4Mi}
+            limits: {memory: 16Mi}
+
+      volumes:
+        - name: host-bin
+          hostPath:
+            path: /opt/chokepoint/bin
+            type: DirectoryOrCreate

@@ -1,0 +1,126 @@
+# The policy, and the MCP client config that puts chokepoint in the path.
+#
+# Both live in the namespace the agent runs in rather than in
+# chokepoint-system: the binary is shared infrastructure, the policy is not.
+# Two agents on the same node have different jobs and therefore different
+# workspaces, and a single cluster-wide policy would have to be the union of
+# them — which is the widest boundary, not the right one.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chokepoint-policy
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: chokepoint
+data:
+  # Trimmed from examples/policy.yaml. The rules that depend on nothing
+  # deployment-specific are kept verbatim; `workspace` is the one thing that
+  # has to be written for the pod it runs in.
+  #
+  # A policy that does not compile is a startup failure, not a warning — so a
+  # bad edit here surfaces as a CrashLoopBackOff on the agent pod, which is the
+  # intended behaviour. The alternative is an agent running with protection its
+  # operator believes is in place.
+  policy.yaml: |
+    default_effect: allow
+
+    # Where this agent is supposed to reach, inside its own container. Empty
+    # this list and every scope rule below goes inert rather than deny-all.
+    workspace:
+      - /workspace
+
+    rules:
+      - name: watch-writes
+        match: tool.startsWith("write") || tool.startsWith("delete")
+        effect: audit
+
+      - name: tool-definition-changed
+        match: tool_definition_changed
+        effect: deny
+        message: >-
+          This tool's definition has changed since this session started. That
+          is the signature of a tool-poisoning attack. Stop and have an
+          operator re-approve the server before using it again.
+
+      - name: halt-decomposed-sweep
+        match: decomposition_score > 0.45 && session_targets > 25
+        effect: deny
+        message: >-
+          This session has touched an unusually broad set of targets with low
+          repetition, which matches a decomposed-task pattern. Narrow the task
+          or request an operator review.
+
+      - name: no-credential-paths
+        match: targets.exists(t, t.contains("/.ssh/") || t.endsWith(".pem") || t.contains("/.aws/"))
+        effect: deny
+        message: Credential material is out of scope; use the configured secret store.
+
+      # In-cluster this rule earns its place twice over. 169.254.169.254 is the
+      # cloud metadata endpoint, and on a managed node it is also the route to
+      # the kubelet's own credentials.
+      - name: no-cloud-metadata
+        match: targets.exists(t, t.contains("169.254.169.254") || t.contains("metadata.google"))
+        effect: deny
+        message: Cloud instance metadata is not reachable through this gateway.
+
+      # Kubernetes mounts the pod's own ServiceAccount token at a fixed path.
+      # An agent that reads it holds whatever RBAC the pod has, from anywhere
+      # it can reach the API server — so this is denied by path rather than
+      # left to the workspace rule, which an operator might widen.
+      - name: no-serviceaccount-token
+        match: targets.exists(t, t.startsWith("/var/run/secrets/kubernetes.io"))
+        effect: deny
+        message: The pod's ServiceAccount token is not readable through this gateway.
+
+      - name: no-recursive-delete
+        match: tool == "delete" && has(args.recursive) && args.recursive == true
+        effect: deny
+        message: Recursive delete is disabled. Delete specific paths instead.
+
+      - name: outside-declared-workspace
+        match: scope_declared && out_of_scope.size() > 0
+        effect: deny
+        message: >-
+          That path is outside this agent's declared workspace. Work within the
+          configured directories, or ask an operator to widen the workspace.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-mcp-config
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: chokepoint
+data:
+  # This is the piece that actually inserts the proxy, and the piece most
+  # likely to be got wrong: nothing about mounting the binary intercepts
+  # anything. The agent has to spawn chokepoint instead of the server, with the
+  # real server command after the `--`.
+  #
+  # Adapt the surrounding shape to whichever client is in the image — the
+  # command/args form below is what Claude Code, Claude Desktop and the MCP
+  # reference clients share. If your client's config is elsewhere, mount this
+  # there instead; the only thing that has to be true is that the process the
+  # client execs is chokepoint.
+  mcp.json: |
+    {
+      "mcpServers": {
+        "filesystem": {
+          "command": "/opt/chokepoint/bin/chokepoint",
+          "args": [
+            "--policy", "/etc/chokepoint/policy.yaml",
+            "--metrics-addr", ":9464",
+            "--audit-log", "/var/log/chokepoint/decisions.jsonl",
+            "--report",
+            "--",
+            "npx", "-y", "@modelcontextprotocol/server-filesystem", "/workspace"
+          ]
+        }
+      }
+    }

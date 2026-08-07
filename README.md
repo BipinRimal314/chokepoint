@@ -14,6 +14,26 @@ calls for behaviour no single call reveals.
 chokepoint --policy policy.yaml -- npx -y @modelcontextprotocol/server-filesystem /srv
 ```
 
+## Install
+
+Tagged releases carry static binaries for Linux, macOS and Windows on amd64 and
+arm64, a `checksums.txt`, and a build provenance attestation.
+
+```bash
+# from a release
+tar xzf chokepoint_<version>_linux_amd64.tar.gz
+sha256sum -c checksums.txt --ignore-missing
+gh attestation verify chokepoint_<version>_linux_amd64.tar.gz --repo BipinRimal314/chokepoint
+
+# or from source
+go install github.com/BipinRimal314/chokepoint/cmd/chokepoint@latest
+```
+
+Verifying the attestation is worth the extra command here specifically: this is
+a binary you are installing in order to *deny* tool calls, which makes it worth
+substituting. Pin a tag — chokepoint is pre-1.0 and both the policy format and
+the score's weights can still move between minor versions.
+
 ## See it work
 
 ```bash
@@ -461,6 +481,22 @@ Asking for telemetry that cannot start is a startup failure, not a warning: an
 operator who believes they have visibility and does not is worse off than one
 who gets an error.
 
+## Kubernetes (k3s)
+
+Manifests in [`deploy/k3s/`](deploy/k3s/), with the reasoning in
+[`deploy/k3s/README.md`](deploy/k3s/README.md).
+
+The shape is not the obvious one, and it follows from the transport. chokepoint
+intercepts a session by being the process the agent spawns, so it has to be
+inside the agent's container at exec time — a `Deployment` with a `Service` in
+front of it would have nothing on its stdin. A DaemonSet therefore stages the
+binary on every node and agent pods mount it read-only, the same shape as a CNI
+plugin installer.
+
+Metrics come from each agent pod rather than from an aggregating Service, which
+is also the more useful arrangement: `chokepoint_policy_denials_total` per agent
+answers a question, summed across a cluster it does not.
+
 ## Known limitations
 
 Stated plainly, because a detector whose limits are undocumented invites
@@ -548,13 +584,25 @@ go build -o chokepoint ./cmd/chokepoint
 
 # end-to-end against a mock MCP server
 ./chokepoint --policy examples/policy.yaml -- python3 testdata/mock_mcp_server.py
+
+# the cost of the read paths, at 10,000 retained calls
+go test ./internal/detect -bench . -benchmem -run '^$' -count=5
+
+# the release build, without tagging anything
+goreleaser check && goreleaser release --snapshot --clean
 ```
+
+Nothing in CI asserts on the benchmarks. A timing threshold on a shared runner
+fails for reasons unrelated to the code, and a flaky gate is one people learn
+to ignore — so they are there to be read when changing `Session`'s read paths,
+not to pass.
 
 ## Status
 
-Working and tested; not yet deployed anywhere real. Next: OpenTelemetry spans
-and Prometheus metrics, then streamable-HTTP transport, then a k3s DaemonSet
-manifest.
+Working and tested; not yet deployed anywhere real. Telemetry, the session
+report, the evidence log, tool-definition fingerprinting and the k3s manifests
+are done. Next: streamable-HTTP transport, and making single-tool sweeps
+scoreable at all — see [Known defect](#known-defect-a-single-tool-sweep-is-invisible).
 
 ## License
 

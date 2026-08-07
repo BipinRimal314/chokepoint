@@ -1,0 +1,148 @@
+# An agent pod with chokepoint in the path. Adapt, do not apply as-is.
+#
+# The image here is a placeholder. What is not a placeholder is the wiring:
+# the read-only hostPath that carries the binary, the policy mount, the
+# metrics port, and the scrape annotations. Those four are the deployment
+# contract; everything else is whichever agent you actually run.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-agent
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: example-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: example-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: example-agent
+      annotations:
+        # chokepoint serves metrics from inside this pod, because that is where
+        # the process runs. There is no chokepoint Service to scrape — each
+        # agent's proxy is its own target, which is also what makes the metrics
+        # useful: `chokepoint_policy_denials_total` per agent answers a
+        # question, summed across the cluster it does not.
+        #
+        # k3s users running kube-prometheus-stack should prefer a PodMonitor;
+        # these annotations are for the annotation-based scrape config, which
+        # is what a stock k3s Prometheus install usually has.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: "/metrics"
+    spec:
+      # The default is to mount a token that reaches the API server. An agent
+      # that does not talk to Kubernetes should not carry one — the policy
+      # denies reading it, but not mounting it at all is the stronger control
+      # and costs nothing.
+      automountServiceAccountToken: false
+
+      # The binary has to be staged before the agent execs it. This is a
+      # startup ordering problem the DaemonSet cannot solve on its own: a
+      # kubelet will happily start this pod first on a fresh node.
+      initContainers:
+        - name: wait-for-chokepoint
+          image: alpine:3.22
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              for _ in $(seq 1 60); do
+                if [ -x /opt/chokepoint/bin/chokepoint ]; then
+                  /opt/chokepoint/bin/chokepoint --version
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "chokepoint was not staged on this node after 120s;" >&2
+              echo "check the chokepoint-installer DaemonSet" >&2
+              exit 1
+          volumeMounts:
+            - name: chokepoint-bin
+              mountPath: /opt/chokepoint/bin
+              readOnly: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+
+      containers:
+        - name: agent
+          # Replace with the image that runs your agent. Whatever it is, its
+          # MCP client must be configured from the agent-mcp-config ConfigMap
+          # so that the process it spawns is chokepoint.
+          image: ghcr.io/example/your-agent:latest
+          ports:
+            - name: metrics
+              containerPort: 9464
+          env:
+            # chokepoint execs the upstream server as a child, so the server's
+            # own runtime still has to be present in this image. Proxying does
+            # not remove that dependency.
+            - name: MCP_CONFIG
+              value: /etc/mcp/mcp.json
+          volumeMounts:
+            - name: chokepoint-bin
+              mountPath: /opt/chokepoint/bin
+              readOnly: true
+            - name: policy
+              mountPath: /etc/chokepoint
+              readOnly: true
+            - name: mcp-config
+              mountPath: /etc/mcp
+              readOnly: true
+            - name: audit
+              mountPath: /var/log/chokepoint
+            - name: workspace
+              mountPath: /workspace
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # Not readOnlyRootFilesystem: the upstream MCP server is commonly
+            # `npx`, which writes a cache. Set it true and mount an emptyDir
+            # over that cache if your server allows it.
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+
+      volumes:
+        - name: chokepoint-bin
+          hostPath:
+            path: /opt/chokepoint/bin
+            # Type Directory, not DirectoryOrCreate: if the installer has not
+            # run on this node, failing to schedule is better than mounting an
+            # empty directory and discovering it at exec time.
+            type: Directory
+        - name: policy
+          configMap:
+            name: chokepoint-policy
+        - name: mcp-config
+          configMap:
+            name: agent-mcp-config
+
+        # The audit log outlives the session but not the pod. That is a real
+        # limitation, not an oversight: an append-only decision log that a
+        # rescheduled pod erases is not evidence, and the compliance argument
+        # in the README (EU AI Act Art 12, ISO 42001 A.6.2.8) depends on
+        # retention this volume does not provide.
+        #
+        # Ship it off the pod before you rely on it. Either a sidecar tailing
+        # this path into your log pipeline, or a hostPath under /var/log that a
+        # node-level collector already watches — chosen deliberately, since a
+        # hostPath makes the log writable by anything else on that node.
+        - name: audit
+          emptyDir: {}
+
+        - name: workspace
+          emptyDir: {}
