@@ -3,6 +3,7 @@ package detect
 import (
 	"encoding/csv"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -239,4 +240,117 @@ func TestPaperDataTimingIsNotALever(t *testing.T) {
 		first,
 		(time.Duration(len(pairs)) * spacings[0].gap),
 		(time.Duration(len(pairs)) * spacings[len(spacings)-1].gap))
+}
+
+// Every number the SaTML section prints, pinned.
+//
+// The generators above assert the *shape* of each claim — that the score is
+// flat, that timing does not move it, that the threshold sits inside the
+// calibration band. Shape is not enough. Swapping the breadth and novelty
+// weights keeps every one of those claims true while sliding the single-tool
+// constant from 0.400 to 0.250, and the paper prints 0.400. A guard that lets
+// the published number change without complaint is not guarding the paper.
+//
+// So these are pinned to six decimal places, and this test is deliberately
+// *not* gated behind CHOKEPOINT_PAPER_DATA: the gated tests skip on an
+// ordinary `go test ./...`, which means until now nothing in CI read these
+// numbers at all. Retuning the detector is allowed. Retuning it without
+// noticing that section.tex now lies is not.
+//
+// If you are here because this test failed after a deliberate weight change:
+// update these constants, re-run the generators, and re-read section.tex and
+// phd/experiments/chokepoint-inline/README.md, both of which quote them.
+const (
+	// §"the score does not move with scale": a single-tool sweep against any
+	// number of targets scores exactly the breadth weight.
+	paperSingleToolScore = 0.400000
+	// §"the dynamic range collapses": spread between the widest- and
+	// narrowest-vocabulary sweep, at the ends of the scale sweep.
+	paperSpanAt8     = 0.600000
+	paperSpanAt20000 = 0.200585
+	// §"evasion is cheap, and priced": 2x call overhead defeats a multi-tool
+	// sweep; a single-tool sweep pays nothing.
+	paperMultiToolNoPad = 0.611538
+	paperMultiToolPad1  = 0.360576
+	// §"timing is not a lever": the same sweep, seconds apart or months apart.
+	paperTimingScore = 0.257867
+	// §Setup: the calibrated band any threshold must sit inside.
+	paperHighestBenign = 0.225085
+	paperLowestAttack  = 0.607627
+	paperThresholdUsed = 0.45
+)
+
+func pin(t *testing.T, label string, got, want float64) {
+	t.Helper()
+	if diff := got - want; diff > 5e-7 || diff < -5e-7 {
+		t.Errorf("%s: the paper prints %.6f, the detector now gives %.6f",
+			label, want, got)
+	}
+}
+
+func TestPublishedNumbersHaveNotDrifted(t *testing.T) {
+	// Scale invariance, at both ends of the range the figure plots.
+	for _, n := range []int{8, 100, 20000} {
+		a := scoreOf(buildSweepN(1, 0, n))
+		pin(t, fmt.Sprintf("single-tool sweep, %d targets", n),
+			a.Score, paperSingleToolScore)
+	}
+	if paperSingleToolScore >= paperThresholdUsed {
+		t.Errorf("the section's premise is gone: a single-tool sweep scores "+
+			"%.6f, which the %.2f threshold now catches",
+			paperSingleToolScore, paperThresholdUsed)
+	}
+
+	// Dynamic range collapse.
+	for _, tc := range []struct {
+		targets int
+		want    float64
+	}{{8, paperSpanAt8}, {20000, paperSpanAt20000}} {
+		lo, hi := math.Inf(1), math.Inf(-1)
+		for _, v := range []int{1, 2, 8, 40} {
+			a := scoreOf(buildSweepN(v, 0, tc.targets))
+			if a.BelowMinimum {
+				continue
+			}
+			lo, hi = math.Min(lo, a.Score), math.Max(hi, a.Score)
+		}
+		pin(t, fmt.Sprintf("vocabulary spread at %d targets", tc.targets),
+			hi-lo, tc.want)
+	}
+
+	// Evasion pricing.
+	pin(t, "4-tool sweep, no padding",
+		scoreOf(buildSweep(4, 0)).Score, paperMultiToolNoPad)
+	pin(t, "4-tool sweep, 1 filler per real call (2x overhead)",
+		scoreOf(buildSweep(4, 1)).Score, paperMultiToolPad1)
+	if paperMultiToolNoPad < paperThresholdUsed {
+		t.Errorf("the evasion result is gone: an unpadded multi-tool sweep "+
+			"scores %.6f and is no longer caught", paperMultiToolNoPad)
+	}
+	if paperMultiToolPad1 >= paperThresholdUsed {
+		t.Errorf("evasion now costs more than 2x: a padded sweep scores "+
+			"%.6f, still above the %.2f threshold",
+			paperMultiToolPad1, paperThresholdUsed)
+	}
+
+	// Timing.
+	pin(t, "4-tool sweep with 2 filler calls (the timing row)",
+		scoreOf(buildSweep(4, 2)).Score, paperTimingScore)
+
+	// The calibration band, and that the shipped threshold still sits in it.
+	highestBenign, lowestAttack := math.Inf(-1), math.Inf(1)
+	for _, s := range calibrationShapes() {
+		score := scoreOf(s.build()).Score
+		if s.benign {
+			highestBenign = math.Max(highestBenign, score)
+		} else {
+			lowestAttack = math.Min(lowestAttack, score)
+		}
+	}
+	pin(t, "highest benign score", highestBenign, paperHighestBenign)
+	pin(t, "lowest attack score", lowestAttack, paperLowestAttack)
+	if paperThresholdUsed <= highestBenign || paperThresholdUsed >= lowestAttack {
+		t.Errorf("the %.2f threshold has fallen outside the measured band "+
+			"[%.6f, %.6f]", paperThresholdUsed, highestBenign, lowestAttack)
+	}
 }
