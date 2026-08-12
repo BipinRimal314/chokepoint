@@ -99,6 +99,14 @@ Every call it blocks is, on its own, an ordinary read of an ordinary path.
   the session's first, so a server that is approved benign and then mutates a
   description — the rug pull — is caught on the next call. See
   [Tool-definition fingerprinting](#tool-definition-fingerprinting).
+- **Arguments are checked against the schema the tool published.** Validated
+  against the *first* `inputSchema` seen, so a server that widens one
+  mid-session to admit an argument it previously refused does not get to ratify
+  it. See [Schema validation](#schema-validation).
+- **Recent activity is counted, not throttled.** `calls_in_window` and
+  `targets_in_window` are handed to rules over a configurable `rate_window`, so
+  the limit stays in your policy rather than compiled in. See
+  [Rate](#rate).
 
 ## Policy
 
@@ -127,9 +135,14 @@ Variables available to `match`:
 | `targets` | list\<string\> | target-like strings extracted from `args` |
 | `session_calls` | int | calls made this session |
 | `session_targets` | int | distinct targets touched this session |
+| `calls_in_window` | int | calls inside `rate_window` |
+| `targets_in_window` | int | distinct targets inside `rate_window` |
 | `decomposition_score` | double | UBFS decomposition score, 0.0–1.0 |
 | `tool_definition_changed` | bool | this tool changed since the first `tools/list` |
 | `session_tools_changed` | int | distinct tools changed since the first listing |
+| `schema_known` | bool | this tool declared an `inputSchema` that compiled |
+| `args_valid` | bool | arguments satisfied it; **true when `schema_known` is false** |
+| `schema_violations` | list\<string\> | what failed, bounded and sorted |
 | `scope_declared` | bool | whether a `workspace` was declared |
 | `out_of_scope` | list\<string\> | this call's targets outside the workspace |
 | `session_out_of_scope` | int | distinct out-of-scope resources this session |
@@ -229,6 +242,35 @@ decomposition score. The same sweep spaced one second apart and six hours
 apart scores identically. Spreading an attack over days moves the vector and
 not the verdict.
 
+**Order is not a lever either, and it points the wrong way.** Randomising which
+tool is used next *raises* the score — 0.757 against 0.618 for the same
+vocabulary walked cyclically — because `transition_novelty` rewards
+unpredictability. An attacker's best sequence is the most boring one available,
+so the evasive strategy and the sophisticated-looking strategy run in opposite
+directions (`go test ./internal/detect -run Ordering -v`).
+
+**Size is not a lever, which is the worst of the three.** The price of evasion
+is 2× overhead at 20 targets and still 2× at 320. Breadth saturates against
+session length and novelty has already collapsed to zero by 60 calls, so a
+larger theft is not a louder one — the attacker pays the same multiple
+regardless of how much they take. A test asserts the overhead never rises with
+length, since that is breadth saturation stated as a check.
+
+### Novelty falls off a cliff
+
+`transition_novelty` does not decay gradually with session length. Measured
+over a looping vocabulary of 20 it reads **1.000 at 20 calls, 0.050 at 40, and
+exactly 0.000 from 60 onward** — once a session cycles its vocabulary twice,
+every transition has been seen more than once and the feature is dead.
+
+A sweep written as an ordinary loop therefore forfeits a quarter of the scoring
+weight without attempting evasion, which caps a looping attacker at 0.75 rather
+than 1.0. The shipped 0.45 threshold sits at roughly 60% of the range actually
+achievable against such an attacker, not 45%.
+
+Those three figures are quoted elsewhere, so `TestNoveltyCliff` reproduces them
+and fails if either the detector or the claim moves.
+
 ### Known defect: a single-tool sweep is invisible
 
 The top-left cell is not an evasion, it is a hole. **A session that calls one
@@ -312,6 +354,82 @@ first listing is not a rug pull and is not caught. And the flag is set when the
 listing *reply* is processed, so a client that pipelines a call ahead of that
 reply is judged against what has been seen so far; a conforming MCP client
 cannot, but a batch harness can.
+
+## Rate
+
+The score measures how *varied* a session is, so a sweep run quickly is not more
+suspicious to it than the same sweep run slowly. That leaves volume — OWASP
+ASI-02, tool misuse by sheer quantity — invisible. Two counters close it:
+
+```yaml
+rate_window: 1m
+
+rules:
+  - name: high-fan-out-rate
+    match: targets_in_window > 100
+    effect: audit
+```
+
+`rate_window` is configuration; the limit is a rule. There is deliberately no
+`max_calls` setting to go with it. A token bucket would move the decision into
+the binary, where it cannot be read next to the other rules and cannot be
+combined with the tool, the scope or the score — and a rate limit that cannot
+say *which* tool it is limiting is not much of a control.
+
+**Use `targets_in_window` before `calls_in_window`.** An agent retrying one file
+is fast and narrow; a sweep is fast and wide. Only the second is evidence of
+anything, and the call counter alone cannot tell them apart.
+
+Both counters include the call being evaluated, so a rule refuses the request
+that completes a burst rather than the one after it.
+
+The counters never enforce on their own. Write no rate rule and two hundred
+calls in a row are all forwarded — `TestRateCountersDoNotEnforceOnTheirOwn`
+pins that.
+
+**Limit worth knowing:** the counts are bounded by retained history. If
+`rate_window` reaches further back than `MaxCalls` allows, the count is a floor
+rather than the number, and a rule reading it under-fires. That case is flagged
+internally as `Truncated`; with the default 10,000-call retention it needs a
+window holding more than ten thousand calls to occur.
+
+## Schema validation
+
+MCP servers are lax about enforcing their own `inputSchema`, so an argument a
+tool never declared can still reach it. The proxy already holds the tool
+definitions, so it can hold the server to the contract it published:
+
+```yaml
+- name: args-violate-declared-schema
+  match: schema_known && !args_valid
+  effect: audit
+```
+
+Validation is against the schema from the **first** `tools/list`, the same
+baseline rule the fingerprint uses. That is what makes this more than a second
+copy of the server's own validation: a server that widens a schema mid-session
+to admit an exfiltration argument does not get to ratify it. The fingerprint
+tells you the definition moved; this refuses the individual call that exploits
+the move.
+
+**`schema_known` is the guard and is not optional.** Most tools in the wild ship
+no schema at all. "Nothing to check against" and "checked and clean" are both an
+empty violation list and opposite facts, so a rule written as bare `!args_valid`
+would deny every unschema'd tool. `args_valid` is `true` when nothing was
+checked, so that mistake fails open rather than closed — but write the guard
+anyway.
+
+Three deliberate refusals to be clever:
+
+- **A schema that will not compile disables the check for that tool** and is
+  recorded, rather than failing closed. An unsupported dialect is a gap in
+  coverage, not evidence about the call.
+- **Remote `$ref`s are never fetched.** A proxy that dialled out to a URL named
+  in a tool definition while deciding whether to allow a call would be a better
+  vulnerability than the one this closes.
+- **Violation strings are bounded and sorted.** They are attacker-influenced in
+  both content and number, and they land in the evidence log and the policy
+  environment on every call.
 
 ## The session report
 
@@ -545,6 +663,40 @@ exactly the over-trust the research warns about.
   malicious from its opening listing is not a rug pull and is not caught. See
   [Tool-definition fingerprinting](#tool-definition-fingerprinting).
 - **stdio transport only.** Streamable-HTTP and SSE are not implemented yet.
+  Several controls are gated behind that; see
+  [What stdio cannot close](#what-stdio-cannot-close).
+
+## What stdio cannot close
+
+Some controls are not missing because nobody wrote them. They need a transport
+that carries the thing being checked, and under stdio there is no such thing to
+check — a session is a subprocess lifetime, there are no headers, and there is
+no token. Listing them as open TODOs would misrepresent the work: they are
+blocked, not pending.
+
+| control | needs | why it is inert under stdio |
+|---|---|---|
+| Session identity | streamable-HTTP | A session *is* the subprocess. There is nothing to bind, spoof, or validate. |
+| `Origin` validation → 403 | HTTP request headers | The DNS-rebinding attack it defends against requires a browser and a network listener; there is neither. |
+| Header/body disagreement → 400 | HTTP + `Mcp-Param-*` | A request-smuggling defence for a request that is one line on a pipe. |
+| RFC 8707 audience validation | Bearer tokens | The confused-deputy defence needs a token to inspect. stdio has no auth layer at all. |
+| Cross-server shadowing | several backends | chokepoint proxies exactly one child process. Two servers cannot collide in a namespace of one. |
+
+The first four become live the moment an HTTP transport lands, and the design
+note that matters is recorded now rather than rediscovered then: **the
+2026-07-28 spec revision deprecates `Mcp-Session-Id` and tells proxies to
+ignore it**, while session scoping is the whole basis of this project's score.
+Any transport work has to put session identity behind an abstraction with two
+backends — the header for older revisions, and a reconstructed identity (a
+bound OAuth token, or `traceparent` from the JSON-RPC `_meta` object) for newer
+ones. Hard-coding either is the mistake available here.
+
+Three further controls are not blocked by transport but are **not enforceable
+from this position at all**, and are recorded so nobody attempts them:
+
+- **In-prompt confusion.** Semantic intent is not in the JSON-RPC bytes.
+- **Tool-output mimicry.** Needs orchestrator-side signing of results.
+- **Human-in-the-loop consent rendering.** Belongs to the client host.
 
 ## Design
 
@@ -600,10 +752,21 @@ not to pass.
 ## Status
 
 Working and tested; released as `v0.1.0`, but not yet deployed anywhere real.
-Telemetry, the session report, the evidence log, tool-definition fingerprinting
-and the k3s manifests are done. Next: streamable-HTTP transport, and making
-single-tool sweeps scoreable at all — see
-[Known defect](#known-defect-a-single-tool-sweep-is-invisible).
+
+Everything stdio can support is built: policy, live scoring, the declared
+workspace, the session report, the evidence log, telemetry, tool-definition
+fingerprinting, schema validation, rate counters, and the k3s manifests.
+
+Two things are left, and they are different kinds of thing.
+
+- **Streamable-HTTP transport**, which unblocks four controls that have nothing
+  to check under stdio — see [What stdio cannot close](#what-stdio-cannot-close).
+  Read the note there about session identity before starting it.
+- **Making a single-tool sweep scoreable at all.** This is the more serious of
+  the two and it is a research problem, not a port: it needs a signal that
+  survives a constant tool sequence, which means the dependency-graph structure
+  of the calls rather than statistics over their vocabulary. See
+  [Known defect](#known-defect-a-single-tool-sweep-is-invisible).
 
 ## License
 

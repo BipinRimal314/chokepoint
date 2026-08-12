@@ -55,10 +55,20 @@ protocol-correct, so a refusal is a decision rather than an outage.
 Beyond single-call inspection, the session is scored for decomposition — the
 case where every individual call is legitimate and the sequence is not.
 
-Two limits, both measured and both in the README: a single-tool sweep scores a
+Volume is covered separately from shape. The score measures how *varied* a
+session is, so a sweep run fast is not more suspicious to it than the same
+sweep run slowly — which left misuse by sheer quantity invisible. Rules now
+also see `calls_in_window` and `targets_in_window` over a configurable
+`rate_window` (`high-fan-out-rate` in the example policy). These are counters
+handed to policy rather than a token bucket, so the limit stays legible next to
+every other rule and can be combined with the tool, the scope and the score.
+
+Three limits, all measured and all in the README: a single-tool sweep scores a
 constant 0.400 at any scale and no threshold catches it; a multi-tool sweep
-evades the shipped threshold at **2× call overhead**. Tool misuse is the
-category chokepoint does most about and it is still not closed.
+evades the shipped threshold at **2× call overhead**; and that overhead does
+not grow with the size of the objective — 2× at 20 targets, 2× at 320 — so a
+larger theft is not a louder one. Tool misuse is the category chokepoint does
+most about and it is still not closed.
 
 ## ASI03 — Identity & Privilege Abuse
 
@@ -94,6 +104,25 @@ Three properties worth knowing:
 - **Key order is not a change; array order is.** A server that re-serialises its
   tool list differently has not mutated anything, and a check that cried wolf
   there would be turned off within a day.
+
+The fingerprint reports that a definition moved. It cannot say whether any
+individual call exploited the move, and the call is what a policy has to decide
+about. Argument validation closes that half: a tool's `inputSchema` is compiled
+from the listing that established its baseline, and `tools/call` arguments are
+checked against **that** schema rather than the current one
+(`args-violate-declared-schema` in the example policy). A server that widens a
+schema mid-session to admit an exfiltration argument therefore does not get to
+ratify it — the widened version is never what the call is measured against.
+
+It also catches the case with no mutation at all. MCP servers are lax about
+enforcing their own declared schemas, so an argument a tool never advertised
+can still reach it; the proxy holding the server to its published contract is a
+control the server itself is not reliably providing.
+
+Still not addressed under ASI04: provenance of the server binary, its
+dependencies, or its install path. chokepoint checks what a server *says* about
+itself against what it said earlier. It has nothing to say about where the
+server came from.
 
 What it does not do. First sight is the baseline, because a proxy cannot know
 what an operator approved — only what the server said first. That makes this
