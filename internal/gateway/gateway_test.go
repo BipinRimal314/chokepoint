@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BipinRimal314/chokepoint/internal/detect"
 	"github.com/BipinRimal314/chokepoint/internal/jsonrpc"
@@ -725,5 +726,103 @@ func TestFingerprintCheckNeedsTheListingFirst(t *testing.T) {
 	serverToClient(t, g, listResponse(t, 2, `[{"name":"read_file","description":"MUTATED"}]`))
 	if got := intercept(t, g, toolCall(t, 4, "read_file", nil)); got.Decision != proxy.Reject {
 		t.Error("the call after the mutating reply was not denied")
+	}
+}
+
+// A rate rule has to stop the sweep while it is happening, which means the
+// counts must include the call being evaluated and must be fed by the same
+// observation stream as the score.
+func TestRateRuleStopsABurstInProgress(t *testing.T) {
+	g := New(Options{
+		Policy: mustPolicy(t, `
+default_effect: allow
+rate_window: 1m
+rules:
+  - name: burst
+    match: calls_in_window > 20
+    effect: deny
+    message: too many calls in the last minute
+`),
+		Detector: detect.NewSession(detect.Config{}),
+	})
+
+	denied := 0
+	firstDenialAt := -1
+	for i := 1; i <= 30; i++ {
+		got := intercept(t, g, toolCall(t, i, "read_file",
+			map[string]any{"path": fmt.Sprintf("/srv/data/%d", i)}))
+		if got.Decision == proxy.Reject {
+			denied++
+			if firstDenialAt < 0 {
+				firstDenialAt = i
+			}
+		}
+	}
+
+	// The 21st call is the first whose window count exceeds 20.
+	if firstDenialAt != 21 {
+		t.Errorf("first denial on call %d, want 21", firstDenialAt)
+	}
+	if denied != 10 {
+		t.Errorf("denied %d of 30, want 10", denied)
+	}
+}
+
+// The counters must not be a second, hidden limit. An operator who writes no
+// rate rule gets no rate enforcement, however fast the agent goes.
+func TestRateCountersDoNotEnforceOnTheirOwn(t *testing.T) {
+	g := New(Options{
+		Policy:   mustPolicy(t, "default_effect: allow\nrate_window: 1m\nrules: []\n"),
+		Detector: detect.NewSession(detect.Config{}),
+	})
+
+	for i := 1; i <= 200; i++ {
+		got := intercept(t, g, toolCall(t, i, "read_file",
+			map[string]any{"path": fmt.Sprintf("/srv/data/%d", i)}))
+		if got.Decision != proxy.Forward {
+			t.Fatalf("call %d was not forwarded; the counters are enforcing by themselves", i)
+		}
+	}
+}
+
+// The window is a policy setting, so a decision record carrying counts without
+// it cannot be read back after the policy changes.
+func TestDecisionEventCarriesTheWindowWithTheCounts(t *testing.T) {
+	obs := &recordingObserver{}
+	g := New(Options{
+		Policy:   mustPolicy(t, "default_effect: allow\nrate_window: 30s\nrules: []\n"),
+		Detector: detect.NewSession(detect.Config{}),
+		Observer: obs,
+	})
+
+	intercept(t, g, toolCall(t, 1, "read_file", map[string]any{"path": "/srv/data/a"}))
+
+	if len(obs.decisions) != 1 {
+		t.Fatalf("recorded %d decisions, want 1", len(obs.decisions))
+	}
+	ev := obs.decisions[0]
+	if ev.RateWindow != 30*time.Second {
+		t.Errorf("RateWindow = %v, want 30s", ev.RateWindow)
+	}
+	if ev.CallsInWindow != 1 || ev.TargetsInWindow != 1 {
+		t.Errorf("CallsInWindow=%d TargetsInWindow=%d, want 1 and 1",
+			ev.CallsInWindow, ev.TargetsInWindow)
+	}
+}
+
+// An operator who sets no rate_window still gets counts, because the evidence
+// log records them on every decision and a missing window makes them unreadable.
+func TestRateWindowFallsBackToTheDefault(t *testing.T) {
+	obs := &recordingObserver{}
+	g := New(Options{
+		Policy:   mustPolicy(t, "default_effect: allow\nrules: []\n"),
+		Detector: detect.NewSession(detect.Config{}),
+		Observer: obs,
+	})
+
+	intercept(t, g, toolCall(t, 1, "read_file", map[string]any{"path": "/srv/data/a"}))
+
+	if got := obs.decisions[0].RateWindow; got != detect.DefaultRateWindow {
+		t.Errorf("RateWindow = %v, want the default %v", got, detect.DefaultRateWindow)
 	}
 }

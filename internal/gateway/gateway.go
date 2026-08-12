@@ -53,6 +53,18 @@ type DecisionEvent struct {
 	SessionCalls     int
 	SessionTargets   int
 
+	// CallsInWindow and TargetsInWindow are recent activity over the policy's
+	// rate window. Recorded on every decision, not only on a rate denial: the
+	// rate an allowed call arrived at is the baseline that makes a later denial
+	// legible to whoever reads the log.
+	CallsInWindow   int
+	TargetsInWindow int
+	// RateWindow is the span those two cover. Without it the counts are
+	// uninterpretable — 200 calls is unremarkable over an hour and an incident
+	// over a second — and the window is a policy setting that can change
+	// between the decisions in one log.
+	RateWindow time.Duration
+
 	// ScopeDeclared is whether a working set was declared. Without it the two
 	// fields below are zero and mean nothing, exactly as a 0.0 score does not
 	// mean "safe" when the session is too short to score.
@@ -241,6 +253,11 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 
 	targets := policy.ExtractTargets(params.Arguments)
 
+	// One clock reading for the observation and the rate window both. Calling
+	// time.Now() again below would put this call fractionally in the past
+	// relative to its own window, which is only ever wrong.
+	now := time.Now()
+
 	// Observed before evaluation so the score reflects this call. A sweep's
 	// final call is the one worth stopping, and scoring it against a session
 	// that excludes it would always be one call behind.
@@ -249,7 +266,7 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 		Target:       firstOf(targets),
 		PayloadBytes: len(msg.Params),
 		IsToolCall:   true,
-		At:           time.Now(),
+		At:           now,
 	})
 
 	assessment := g.assess()
@@ -258,6 +275,8 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 	// Read once. The policy request and the decision event both want it, and
 	// asking twice used to mean walking the whole session twice.
 	sessionTargets := g.distinctTargets()
+	window := g.rateWindow()
+	rate := g.countsInWindow(window, now)
 
 	decision := g.evaluate(policy.Request{
 		Tool:               params.Name,
@@ -266,6 +285,8 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 		Targets:            targets,
 		SessionCalls:       assessment.Calls,
 		SessionTargets:     sessionTargets,
+		CallsInWindow:      rate.Calls,
+		TargetsInWindow:    rate.Targets,
 		DecompositionScore: assessment.Score,
 		ScopeDeclared:      scope.Declared,
 		OutOfScope:         outOfScope,
@@ -288,6 +309,10 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 			ScoreUnavailable: assessment.BelowMinimum,
 			SessionCalls:     assessment.Calls,
 			SessionTargets:   sessionTargets,
+
+			CallsInWindow:   rate.Calls,
+			TargetsInWindow: rate.Targets,
+			RateWindow:      window,
 
 			ScopeDeclared:     scope.Declared,
 			OutOfScope:        len(outOfScope),
@@ -517,6 +542,24 @@ func (g *Gateway) outOfScope(targets []string) []string {
 		}
 	}
 	return out
+}
+
+// rateWindow is the policy's window, or the default when it set none.
+//
+// The default lives here rather than in policy because policy does not import
+// detect, and it is detect that owns what the counters mean.
+func (g *Gateway) rateWindow() time.Duration {
+	if d := g.opts.Policy.RateWindowDuration(); d > 0 {
+		return d
+	}
+	return detect.DefaultRateWindow
+}
+
+func (g *Gateway) countsInWindow(d time.Duration, now time.Time) detect.WindowCounts {
+	if g.opts.Detector == nil {
+		return detect.WindowCounts{}
+	}
+	return g.opts.Detector.CountsInWindow(d, now)
 }
 
 func (g *Gateway) distinctTargets() int {

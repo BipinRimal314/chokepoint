@@ -17,6 +17,11 @@ type ring struct {
 	buf  []Call
 	head int // index of the oldest retained call
 	n    int // how many are retained
+	// evicted records whether anything has ever been dropped. It is what lets a
+	// window count say "this is a floor" rather than "this is the number": a
+	// session that has never evicted is not hiding anything behind its oldest
+	// call, and one that has may be.
+	evicted bool
 }
 
 // ringMinCap is the first allocation, sized so that short sessions — the
@@ -42,6 +47,7 @@ func (r *ring) push(c Call, max int) {
 		// to keep them from being retained.
 		r.buf[r.head] = c
 		r.head = r.next(r.head)
+		r.evicted = true
 		return
 	}
 
@@ -86,6 +92,7 @@ func (r *ring) dropOldest(k int) {
 
 	r.head = (r.head + k) % len(r.buf)
 	r.n -= k
+	r.evicted = true
 }
 
 func (r *ring) next(i int) int {

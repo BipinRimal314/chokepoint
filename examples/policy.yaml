@@ -11,6 +11,8 @@
 #   targets               list     target-like strings pulled out of args
 #   session_calls         int      calls made in this session
 #   session_targets       int      distinct targets touched this session
+#   calls_in_window       int      calls inside `rate_window` below
+#   targets_in_window     int      distinct targets inside `rate_window`
 #   decomposition_score   double   UBFS decomposition score, 0.0-1.0
 #   tool_definition_changed  bool  this tool changed since the first tools/list
 #   session_tools_changed    int   distinct tools changed since the first listing
@@ -19,6 +21,11 @@
 #   session_out_of_scope  int      distinct out-of-scope resources this session
 
 default_effect: allow
+
+# How far back calls_in_window and targets_in_window look. There is no limit
+# setting to go with it — the limit is a rule, so it sits with the others and
+# can be combined with the tool, the scope and the score.
+rate_window: 1m
 
 # Where this agent is supposed to reach: absolute paths or URI prefixes.
 #
@@ -89,6 +96,26 @@ rules:
     match: tool == "delete" && has(args.recursive) && args.recursive == true
     effect: deny
     message: Recursive delete is disabled. Delete specific paths instead.
+
+  # Rate, shipped as `audit` rather than `deny` on purpose.
+  #
+  # Every other threshold in this file comes from a measured separation band.
+  # This one cannot: there is no such thing as a generally correct tool-call
+  # rate, because it depends entirely on what the agent is for. A build agent
+  # reading a thousand files in a minute is working; a support agent doing the
+  # same is not. So the number below is a starting point, not a finding.
+  #
+  # Run it as audit, read `chokepoint.rate.*` out of the evidence log for a
+  # week, then set the number from what you saw and switch the effect. Arming a
+  # rate limit that has never been measured against the deployment is how a
+  # proxy becomes the thing that broke production.
+  #
+  # targets_in_window rather than calls_in_window: an agent retrying one file
+  # is fast and narrow, a sweep is fast and wide, and only the second is
+  # evidence of anything.
+  - name: high-fan-out-rate
+    match: targets_in_window > 100
+    effect: audit
 
   # The backstop, and the answer to the sweep the score cannot see. A session
   # calling one tool against any number of targets scores a constant 0.400

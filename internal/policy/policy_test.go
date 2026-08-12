@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func mustParse(t *testing.T, src string) *Policy {
@@ -389,5 +390,83 @@ rules:
 `)
 	if got := p.Evaluate(Request{Tool: "read_file"}); got.Effect != EffectDeny {
 		t.Errorf("effect = %v, want deny — an unguarded rule matches on an empty list", got.Effect)
+	}
+}
+
+func TestRateWindowParsing(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"absent", "rules: []\n", 0, false},
+		{"seconds", "rate_window: 30s\nrules: []\n", 30 * time.Second, false},
+		{"minutes", "rate_window: 5m\nrules: []\n", 5 * time.Minute, false},
+		// A window that fails to parse must stop the load. Falling back to a
+		// default would leave the operator with a rate limit measured over a
+		// span they did not choose and were never told about.
+		{"malformed", "rate_window: 30 seconds\nrules: []\n", 0, true},
+		{"zero", "rate_window: 0s\nrules: []\n", 0, true},
+		{"negative", "rate_window: -1m\nrules: []\n", 0, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := Parse([]byte(tc.yaml))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Parse(%q) succeeded, want an error", tc.yaml)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := p.RateWindowDuration(); got != tc.want {
+				t.Errorf("RateWindowDuration() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRateRulesReadWindowCounts(t *testing.T) {
+	p, err := Parse([]byte(`
+default_effect: allow
+rate_window: 1m
+rules:
+  - name: burst
+    match: calls_in_window > 100
+    effect: deny
+    message: slow down
+  - name: fan-out
+    match: targets_in_window > 50
+    effect: deny
+    message: too many distinct targets at once
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	cases := []struct {
+		name       string
+		req        Request
+		wantEffect Effect
+		wantRule   string
+	}{
+		{"quiet", Request{CallsInWindow: 10, TargetsInWindow: 10}, EffectAllow, ""},
+		{"burst", Request{CallsInWindow: 101, TargetsInWindow: 1}, EffectDeny, "burst"},
+		// Narrow and fast is a retry loop; wide and fast is a sweep. The second
+		// rule catches the sweep that stayed under the call limit.
+		{"fan-out", Request{CallsInWindow: 60, TargetsInWindow: 60}, EffectDeny, "fan-out"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := p.Evaluate(tc.req)
+			if got.Effect != tc.wantEffect || got.Rule != tc.wantRule {
+				t.Errorf("Evaluate = %s/%q, want %s/%q",
+					got.Effect, got.Rule, tc.wantEffect, tc.wantRule)
+			}
+		})
 	}
 }

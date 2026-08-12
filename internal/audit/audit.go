@@ -65,6 +65,10 @@ const (
 	KeyScopeDeclared  = "chokepoint.scope.declared"
 	KeyOutOfScope     = "chokepoint.scope.out_of_scope"
 	KeySessionOutOf   = "chokepoint.scope.session_out_of_scope"
+
+	KeyCallsInWindow   = "chokepoint.rate.calls_in_window"
+	KeyTargetsInWindow = "chokepoint.rate.targets_in_window"
+	KeyRateWindow      = "chokepoint.rate.window_seconds"
 )
 
 // OperationToolCall is the gen_ai.operation.name value for a tool call.
@@ -105,6 +109,17 @@ func Attributes(ev gateway.DecisionEvent) []Attr {
 		Attr{KeyToolChanged, ev.ToolDefinitionChanged},
 		Attr{KeyToolsChanged, ev.SessionToolsChanged},
 	)
+	// The window goes in the record alongside the counts. A rate is two numbers
+	// and one of them is configuration, so a log holding only the count cannot
+	// be read after someone edits the policy — and the edit is exactly what an
+	// investigation would want to notice.
+	if ev.RateWindow > 0 {
+		attrs = append(attrs,
+			Attr{KeyCallsInWindow, ev.CallsInWindow},
+			Attr{KeyTargetsInWindow, ev.TargetsInWindow},
+			Attr{KeyRateWindow, ev.RateWindow.Seconds()},
+		)
+	}
 	if ev.ScopeDeclared {
 		attrs = append(attrs,
 			Attr{KeyScopeDeclared, true},

@@ -13,6 +13,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
@@ -73,7 +74,30 @@ type Policy struct {
 	// scope_declared goes false and scope rules stay inert rather than denying
 	// everything.
 	Workspace []string `yaml:"workspace"`
-	Rules     []Rule   `yaml:"rules"`
+	// RateWindow is how far back calls_in_window and targets_in_window look,
+	// as a Go duration string ("30s", "5m"). Empty leaves the choice to the
+	// caller, which is where the default lives — this package deliberately does
+	// not import detect.
+	//
+	// The window is configuration; the limit is not. There is no max_calls
+	// setting here on purpose — a rule saying calls_in_window > 200 keeps the
+	// number where an operator can see it next to every other rule, and lets it
+	// be combined with the tool, the scope and the score rather than standing
+	// alone as a bucket that only knows how to count.
+	RateWindow string `yaml:"rate_window"`
+	Rules      []Rule `yaml:"rules"`
+
+	// rateWindow is RateWindow parsed, so a malformed duration is a load-time
+	// error rather than a window that silently reverts to the default.
+	rateWindow time.Duration
+}
+
+// RateWindowDuration is the configured window, or zero when none was set.
+func (p *Policy) RateWindowDuration() time.Duration {
+	if p == nil {
+		return 0
+	}
+	return p.rateWindow
 }
 
 // Request is the evaluation context exposed to CEL expressions.
@@ -90,6 +114,12 @@ type Request struct {
 	SessionCalls int
 	// SessionTargets is how many distinct targets this session has touched.
 	SessionTargets int
+	// CallsInWindow is how many calls fall inside the configured rate window,
+	// and TargetsInWindow how many distinct targets they named. Both count the
+	// call being evaluated, so a rule can refuse the request that completes a
+	// burst rather than the one after it.
+	CallsInWindow   int
+	TargetsInWindow int
 	// DecompositionScore is the detector's current assessment, in [0,1].
 	DecompositionScore float64
 	// ScopeDeclared is whether a workspace was declared at all. Rules must
@@ -136,6 +166,8 @@ func declarations() []cel.EnvOption {
 		cel.Variable("targets", cel.ListType(cel.StringType)),
 		cel.Variable("session_calls", cel.IntType),
 		cel.Variable("session_targets", cel.IntType),
+		cel.Variable("calls_in_window", cel.IntType),
+		cel.Variable("targets_in_window", cel.IntType),
 		cel.Variable("decomposition_score", cel.DoubleType),
 		cel.Variable("tool_definition_changed", cel.BoolType),
 		cel.Variable("session_tools_changed", cel.IntType),
@@ -161,6 +193,17 @@ func (p *Policy) Compile() error {
 	}
 	if err := validEffect(p.DefaultEffect); err != nil {
 		return fmt.Errorf("default_effect: %w", err)
+	}
+
+	if s := strings.TrimSpace(p.RateWindow); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("rate_window: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("rate_window: must be positive, got %s", s)
+		}
+		p.rateWindow = d
 	}
 
 	for i := range p.Rules {
@@ -221,6 +264,8 @@ func (p *Policy) Evaluate(req Request) Decision {
 		"targets":             req.Targets,
 		"session_calls":       req.SessionCalls,
 		"session_targets":     req.SessionTargets,
+		"calls_in_window":     req.CallsInWindow,
+		"targets_in_window":   req.TargetsInWindow,
 		"decomposition_score": req.DecompositionScore,
 
 		"tool_definition_changed": req.ToolDefinitionChanged,
