@@ -599,10 +599,11 @@ not to pass.
 
 ## Status
 
-Working and tested; not yet deployed anywhere real. Telemetry, the session
-report, the evidence log, tool-definition fingerprinting and the k3s manifests
-are done. Next: streamable-HTTP transport, and making single-tool sweeps
-scoreable at all — see [Known defect](#known-defect-a-single-tool-sweep-is-invisible).
+Working and tested; released as `v0.1.0`, but not yet deployed anywhere real.
+Telemetry, the session report, the evidence log, tool-definition fingerprinting
+and the k3s manifests are done. Next: streamable-HTTP transport, and making
+single-tool sweeps scoreable at all — see
+[Known defect](#known-defect-a-single-tool-sweep-is-invisible).
 
 ## License
 

@@ -36,9 +36,10 @@ kubectl apply -f 20-policy-configmap.yaml
 kubectl apply -f 30-agent-deployment.yaml
 ```
 
-Set `CHOKEPOINT_VERSION` in `10-installer-daemonset.yaml` to a published
-release before applying — the default is a placeholder and the install will
-fail loudly on a 404 rather than staging nothing quietly.
+`CHOKEPOINT_VERSION` in `10-installer-daemonset.yaml` defaults to `0.1.0`,
+which is published. Point it at a different release by editing that value and
+nothing else; if the tag does not exist the install fails loudly on a 404
+rather than staging nothing quietly.
 
 Confirm the stage landed:
 
