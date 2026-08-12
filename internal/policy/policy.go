@@ -140,6 +140,18 @@ type Request struct {
 	// SessionToolsChanged is how many distinct tools have been modified or
 	// added since the first listing.
 	SessionToolsChanged int
+	// SchemaKnown is whether the tool advertised an inputSchema that compiled.
+	// Rules must guard on it for the same reason they guard on scope_declared:
+	// a tool with no schema produces no violations, and so does a call that is
+	// perfectly valid, and a rule that cannot tell them apart denies every use
+	// of an unschema'd tool.
+	SchemaKnown bool
+	// ArgsValid is whether the arguments satisfied that schema. True when
+	// SchemaKnown is false, so an unguarded rule fails open rather than closed.
+	ArgsValid bool
+	// SchemaViolations describes what failed, bounded and sorted. Empty when
+	// ArgsValid.
+	SchemaViolations []string
 }
 
 // Decision is the outcome of evaluating a policy.
@@ -170,6 +182,9 @@ func declarations() []cel.EnvOption {
 		cel.Variable("targets_in_window", cel.IntType),
 		cel.Variable("decomposition_score", cel.DoubleType),
 		cel.Variable("tool_definition_changed", cel.BoolType),
+		cel.Variable("schema_known", cel.BoolType),
+		cel.Variable("args_valid", cel.BoolType),
+		cel.Variable("schema_violations", cel.ListType(cel.StringType)),
 		cel.Variable("session_tools_changed", cel.IntType),
 		cel.Variable("scope_declared", cel.BoolType),
 		cel.Variable("out_of_scope", cel.ListType(cel.StringType)),
@@ -269,7 +284,11 @@ func (p *Policy) Evaluate(req Request) Decision {
 		"decomposition_score": req.DecompositionScore,
 
 		"tool_definition_changed": req.ToolDefinitionChanged,
-		"session_tools_changed":   req.SessionToolsChanged,
+
+		"schema_known":          req.SchemaKnown,
+		"args_valid":            req.ArgsValid,
+		"schema_violations":     req.SchemaViolations,
+		"session_tools_changed": req.SessionToolsChanged,
 
 		"scope_declared":       req.ScopeDeclared,
 		"out_of_scope":         req.OutOfScope,
@@ -283,6 +302,9 @@ func (p *Policy) Evaluate(req Request) Decision {
 	}
 	if req.OutOfScope == nil {
 		vars["out_of_scope"] = []string{}
+	}
+	if req.SchemaViolations == nil {
+		vars["schema_violations"] = []string{}
 	}
 
 	var audited []string

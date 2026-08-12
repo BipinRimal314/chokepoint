@@ -15,6 +15,9 @@
 #   targets_in_window     int      distinct targets inside `rate_window`
 #   decomposition_score   double   UBFS decomposition score, 0.0-1.0
 #   tool_definition_changed  bool  this tool changed since the first tools/list
+#   schema_known          bool     this tool declared an inputSchema that compiled
+#   args_valid            bool     args satisfied it (true when schema_known is false)
+#   schema_violations     list     what failed, bounded and sorted
 #   session_tools_changed    int   distinct tools changed since the first listing
 #   scope_declared        bool     whether `workspace` below is non-empty
 #   out_of_scope          list     this call's targets outside the workspace
@@ -65,6 +68,26 @@ rules:
       This tool's definition has changed since this session started. That is
       the signature of a tool-poisoning attack. Stop and have an operator
       re-approve the server before using it again.
+
+  # Holds the server to the contract it published. MCP servers are lax about
+  # enforcing their own inputSchema, so an argument a tool never declared can
+  # still reach it — and validation is against the schema from the FIRST
+  # listing, so a server that widens one mid-session to admit an exfiltration
+  # argument does not get to ratify it. That is the half of the rug pull the
+  # fingerprint above flags but cannot act on call by call.
+  #
+  # `schema_known` is the guard and is not optional. Most tools in the wild
+  # ship no schema at all; without it this rule denies every one of them.
+  # args_valid is true when there is nothing to check, so the mistake fails
+  # open rather than closed, but write the guard anyway — it says what you mean.
+  #
+  # Shipped as audit for the same reason as the rate rule below: a schema
+  # strict enough to be worth enforcing is also strict enough to break a
+  # working agent, and that is a question about your servers, not about this
+  # file. Watch chokepoint.schema.violations for a week, then arm it.
+  - name: args-violate-declared-schema
+    match: schema_known && !args_valid
+    effect: audit
 
   # Individually legitimate calls, blocked for what they add up to. This is
   # the rule the project exists for: the failure mode the threat-to-governance

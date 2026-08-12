@@ -81,6 +81,15 @@ type DecisionEvent struct {
 	ToolDefinitionChanged bool
 	// SessionToolsChanged is how many distinct tools have changed so far.
 	SessionToolsChanged int
+
+	// SchemaKnown is whether this tool's first-seen inputSchema compiled, and
+	// ArgsValid whether the arguments satisfied it. ArgsValid is true when
+	// SchemaKnown is false — an unchecked call is not a failed one.
+	SchemaKnown bool
+	ArgsValid   bool
+	// SchemaViolations describes what failed. Attacker-influenced, like
+	// Targets, so it belongs on a span and never on a metric label.
+	SchemaViolations []string
 }
 
 // CompletionEvent reports the upstream's answer to a forwarded call.
@@ -243,9 +252,16 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 	var params toolCallParams
 	if len(msg.Params) > 0 {
 		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			// Malformed params are the upstream server's business to reject —
-			// it owns the tool's schema. Forwarding keeps chokepoint from
-			// becoming a second, divergent validator.
+			// Params that will not decode as JSON-RPC at all are the upstream
+			// server's business to reject. Forwarding keeps chokepoint from
+			// becoming a second, divergent parser of the envelope.
+			//
+			// Not in tension with the schema check further down, which is a
+			// different question: that one asks whether decodable arguments
+			// match what the tool itself advertised, and it exists precisely
+			// because servers are lax about enforcing their own declared
+			// schemas. This branch is reached only when there is nothing to
+			// check.
 			g.opts.Logger.Debug("tools/call params did not decode", "error", err)
 			return proxy.Interception{Decision: proxy.Forward}, nil
 		}
@@ -277,6 +293,7 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 	sessionTargets := g.distinctTargets()
 	window := g.rateWindow()
 	rate := g.countsInWindow(window, now)
+	schemaKnown, violations := g.opts.Inventory.Validate(params.Name, params.Arguments)
 
 	decision := g.evaluate(policy.Request{
 		Tool:               params.Name,
@@ -294,6 +311,10 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 
 		ToolDefinitionChanged: g.opts.Inventory.Changed(params.Name),
 		SessionToolsChanged:   g.opts.Inventory.ChangedCount(),
+
+		SchemaKnown:      schemaKnown,
+		ArgsValid:        len(violations) == 0,
+		SchemaViolations: violations,
 	})
 
 	if g.opts.Observer != nil {
@@ -320,6 +341,10 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 
 			ToolDefinitionChanged: g.opts.Inventory.Changed(params.Name),
 			SessionToolsChanged:   g.opts.Inventory.ChangedCount(),
+
+			SchemaKnown:      schemaKnown,
+			ArgsValid:        len(violations) == 0,
+			SchemaViolations: violations,
 		})
 	}
 

@@ -69,6 +69,10 @@ const (
 	KeyCallsInWindow   = "chokepoint.rate.calls_in_window"
 	KeyTargetsInWindow = "chokepoint.rate.targets_in_window"
 	KeyRateWindow      = "chokepoint.rate.window_seconds"
+
+	KeySchemaKnown      = "chokepoint.schema.known"
+	KeyArgsValid        = "chokepoint.schema.args_valid"
+	KeySchemaViolations = "chokepoint.schema.violations"
 )
 
 // OperationToolCall is the gen_ai.operation.name value for a tool call.
@@ -119,6 +123,17 @@ func Attributes(ev gateway.DecisionEvent) []Attr {
 			Attr{KeyTargetsInWindow, ev.TargetsInWindow},
 			Attr{KeyRateWindow, ev.RateWindow.Seconds()},
 		)
+	}
+	// schema.known is recorded either way, for the same reason
+	// tool.definition_changed is: "this call was checked against the tool's
+	// declared schema and matched it" is evidence, and an absent attribute
+	// would not distinguish it from a tool that declared no schema to check.
+	attrs = append(attrs, Attr{KeySchemaKnown, ev.SchemaKnown})
+	if ev.SchemaKnown {
+		attrs = append(attrs, Attr{KeyArgsValid, ev.ArgsValid})
+		if len(ev.SchemaViolations) > 0 {
+			attrs = append(attrs, Attr{KeySchemaViolations, ev.SchemaViolations})
+		}
 	}
 	if ev.ScopeDeclared {
 		attrs = append(attrs,

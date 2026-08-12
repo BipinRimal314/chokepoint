@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // ChangeKind is what happened to a tool definition between listings.
@@ -81,16 +83,29 @@ func short(fp string) string {
 //
 // Safe for concurrent use; responses are observed from a proxy pump goroutine.
 type Registry struct {
-	mu       sync.Mutex
-	first    map[string]string // tool name -> fingerprint at first sight
-	changed  map[string]bool   // tools modified or added after the first listing
+	mu      sync.Mutex
+	first   map[string]string // tool name -> fingerprint at first sight
+	changed map[string]bool   // tools modified or added after the first listing
+	// schemas holds the compiled inputSchema from the listing that established
+	// each tool's baseline. Absent means the tool declared none or advertised
+	// one that would not compile; see Validate, which will not guess.
+	schemas  map[string]*jsonschema.Schema
 	changes  []Change
 	listings int
+	// schemaErrs records tools whose declared schema failed to compile, so the
+	// gateway can say so once rather than the operator wondering why a tool is
+	// never validated.
+	schemaErrs map[string]error
 }
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
-	return &Registry{first: make(map[string]string), changed: make(map[string]bool)}
+	return &Registry{
+		first:      make(map[string]string),
+		changed:    make(map[string]bool),
+		schemas:    make(map[string]*jsonschema.Schema),
+		schemaErrs: make(map[string]error),
+	}
 }
 
 // Observe records one tools/list result and returns what changed.
@@ -105,6 +120,7 @@ func (r *Registry) Observe(tools []json.RawMessage) []Change {
 
 	r.listings++
 	seen := make(map[string]string, len(tools))
+	raws := make(map[string]json.RawMessage, len(tools))
 
 	for _, raw := range tools {
 		name, fp, ok := fingerprint(raw)
@@ -115,12 +131,14 @@ func (r *Registry) Observe(tools []json.RawMessage) []Change {
 			continue
 		}
 		seen[name] = fp
+		raws[name] = raw
 	}
 
 	// The first listing is the baseline.
 	if r.listings == 1 {
 		for name, fp := range seen {
 			r.first[name] = fp
+			r.compileLocked(name, raws[name])
 		}
 		return nil
 	}
@@ -132,6 +150,11 @@ func (r *Registry) Observe(tools []json.RawMessage) []Change {
 		case !known:
 			r.first[name] = fp
 			r.changed[name] = true
+			// A tool that appears late still gets its schema captured from the
+			// listing that introduced it — that listing is its baseline, the
+			// same rule the fingerprint follows. It is flagged as added
+			// regardless, so a policy can refuse to trust it at all.
+			r.compileLocked(name, raws[name])
 			out = append(out, Change{Tool: name, Kind: Added, Now: fp, Listing: r.listings})
 		case was != fp:
 			r.changed[name] = true
@@ -157,6 +180,46 @@ func (r *Registry) Observe(tools []json.RawMessage) []Change {
 
 	r.changes = append(r.changes, out...)
 	return out
+}
+
+// compileLocked captures a tool's declared schema at the moment it becomes the
+// baseline. Never called for a later listing of a tool already known: the whole
+// point is that the schema a call is checked against is the one the tool was
+// first advertised with.
+func (r *Registry) compileLocked(name string, raw json.RawMessage) {
+	if len(raw) == 0 {
+		return
+	}
+	sch, err := compileSchema(name, raw)
+	if err != nil {
+		// Recorded, not fatal, and deliberately not treated as "invalid". A
+		// schema this build cannot compile is a gap in what can be checked, not
+		// evidence about the call — failing closed here would deny every use of
+		// a tool because of a dialect the library does not know.
+		r.schemaErrs[name] = err
+		return
+	}
+	if sch != nil {
+		r.schemas[name] = sch
+	}
+}
+
+// SchemaErrors returns the tools whose declared inputSchema did not compile.
+func (r *Registry) SchemaErrors() map[string]error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]error, len(r.schemaErrs))
+	for k, v := range r.schemaErrs {
+		out[k] = v
+	}
+	return out
+}
+
+// Schemas is how many tools are validatable.
+func (r *Registry) Schemas() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.schemas)
 }
 
 func (r *Registry) removedAlreadyLocked(name string) bool {

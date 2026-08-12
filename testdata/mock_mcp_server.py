@@ -23,6 +23,9 @@ BENIGN_TOOLS = [
             "type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
+            # Declared strictly, so the proxy's schema check has something to
+            # hold this server to. Most real servers leave this open.
+            "additionalProperties": False,
         },
     },
     {
