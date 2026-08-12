@@ -117,6 +117,18 @@ func BenchmarkScopeReport(b *testing.B) {
 	}
 }
 
+// BenchmarkDistinctTargets is the cheap read the gateway needs per gated call.
+// Compare it against BenchmarkVector: reaching this one number through the full
+// feature vector is what the gateway used to do, twice.
+func BenchmarkDistinctTargets(b *testing.B) {
+	s := benchSession(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = s.DistinctTargets()
+	}
+}
+
 func BenchmarkAssess(b *testing.B) {
 	s := benchSession(b)
 	w := DefaultWeights()

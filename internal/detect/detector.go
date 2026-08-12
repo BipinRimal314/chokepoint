@@ -74,7 +74,7 @@ type Session struct {
 	cfg Config
 
 	mu        sync.Mutex
-	calls     []Call
+	calls     ring
 	startedAt time.Time
 }
 
@@ -102,37 +102,31 @@ func (s *Session) Observe(c Call) {
 		s.startedAt = c.At
 	}
 
-	s.calls = append(s.calls, c)
+	// The cap is enforced by push, which overwrites the oldest slot rather than
+	// letting the buffer exceed it. Only the window needs a separate pass.
+	s.calls.push(c, s.cfg.MaxCalls)
 	s.evictLocked(c.At)
 }
 
-// evictLocked drops history outside the window or over the cap.
+// evictLocked drops history that has fallen outside the window.
 func (s *Session) evictLocked(now time.Time) {
-	if s.cfg.Window > 0 {
-		cutoff := now.Add(-s.cfg.Window)
-		i := 0
-		for i < len(s.calls) && s.calls[i].At.Before(cutoff) {
-			i++
-		}
-		if i > 0 {
-			// Copy down rather than reslicing: reslicing keeps the whole
-			// backing array alive, so a long session would never release the
-			// memory of the calls it evicted.
-			s.calls = append(s.calls[:0], s.calls[i:]...)
-		}
+	if s.cfg.Window <= 0 {
+		return
 	}
 
-	if len(s.calls) > s.cfg.MaxCalls {
-		drop := len(s.calls) - s.cfg.MaxCalls
-		s.calls = append(s.calls[:0], s.calls[drop:]...)
+	cutoff := now.Add(-s.cfg.Window)
+	drop := 0
+	for drop < s.calls.n && s.calls.at(drop).At.Before(cutoff) {
+		drop++
 	}
+	s.calls.dropOldest(drop)
 }
 
 // Len returns the number of retained calls.
 func (s *Session) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.calls)
+	return s.calls.n
 }
 
 // Vector computes the UBFS observation for the current window.
@@ -147,11 +141,10 @@ func (s *Session) Vector() *Vector {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	calls := s.calls
 	started := s.startedAt
 
 	v := NewVector()
-	if len(calls) == 0 {
+	if s.calls.n == 0 {
 		return v
 	}
 
@@ -167,36 +160,49 @@ func (s *Session) Vector() *Vector {
 		prevTool                         string
 	)
 
-	for _, c := range calls {
-		if c.IsToolCall {
-			toolCalls++
-		} else {
-			secondary++
-		}
-		if c.Errored {
-			peripheral++
-		}
+	// The ring holds its contents as at most two contiguous runs, so the walk is
+	// nested rather than flat. That costs about 3% against the old single slice
+	// and three shapes were measured trying to avoid it — a range-over-func
+	// iterator (+4%, it does not inline across the method boundary), a closure
+	// applied per run (+2.6%), and this (+3.3%). They are the same number. The
+	// cost is the segmented walk itself, not the way it is spelled, so this is
+	// the plainest of the three rather than the fastest.
+	//
+	// It buys eviction going from 25µs per call to 0.3µs once a session is at
+	// MaxCalls, which is where a long-running agent spends its life.
+	front, back := s.calls.parts()
+	for _, seg := range [2][]Call{front, back} {
+		for _, c := range seg {
+			if c.IsToolCall {
+				toolCalls++
+			} else {
+				secondary++
+			}
+			if c.Errored {
+				peripheral++
+			}
 
-		toolCounts[c.Tool]++
-		if c.Target != "" {
-			targets[c.Target] = struct{}{}
-		}
-		if prevTool != "" {
-			transitions[prevTool+"\x00"+c.Tool]++
-		}
-		prevTool = c.Tool
+			toolCounts[c.Tool]++
+			if c.Target != "" {
+				targets[c.Target] = struct{}{}
+			}
+			if prevTool != "" {
+				transitions[prevTool+"\x00"+c.Tool]++
+			}
+			prevTool = c.Tool
 
-		totalBytes += c.PayloadBytes
-		payloads = append(payloads, float64(c.PayloadBytes))
+			totalBytes += c.PayloadBytes
+			payloads = append(payloads, float64(c.PayloadBytes))
 
-		hour := c.At.Hour()
-		if hour < s.cfg.BusinessHoursStart || hour >= s.cfg.BusinessHoursEnd {
-			afterHours++
+			hour := c.At.Hour()
+			if hour < s.cfg.BusinessHoursStart || hour >= s.cfg.BusinessHoursEnd {
+				afterHours++
+			}
 		}
 	}
 
-	n := len(calls)
-	last := calls[n-1].At
+	n := s.calls.n
+	last := s.calls.at(n - 1).At
 
 	// TEMPORAL
 	v.Set(FeatActivityHourMean, float64(started.Hour()))
@@ -228,6 +234,30 @@ func (s *Session) Vector() *Vector {
 
 	// DEVIATION and PRIVILEGE stay neutral; see coverage.
 	return v
+}
+
+// DistinctTargets is how many distinct targets the retained history names.
+//
+// The same number as Vector().Get(FeatTargetBreadth), and it exists because
+// that is a very expensive way to ask. The gateway needs this count on every
+// gated call, and reaching it through Vector built all twenty features —
+// tallying tools, hashing every transition pair, accumulating a payload slice
+// and computing a standard deviation — to read one of them. This walk keeps the
+// one map it needs.
+func (s *Session) DistinctTargets() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	targets := make(map[string]struct{})
+	front, back := s.calls.parts()
+	for _, seg := range [2][]Call{front, back} {
+		for _, c := range seg {
+			if c.Target != "" {
+				targets[c.Target] = struct{}{}
+			}
+		}
+	}
+	return len(targets)
 }
 
 // ---------------------------------------------------------------------------

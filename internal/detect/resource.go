@@ -205,22 +205,31 @@ func (s *Session) ResourceSummary() ResourceSummary {
 	dirSeen := make(map[string]map[string]struct{})
 	rootSeen := make(map[string]map[string]struct{})
 
-	for i, c := range s.calls {
-		// Normalised once at Observe; see Call.res.
-		r := c.res
-		if r.Empty() {
-			continue
-		}
-		key := r.Scheme + "://" + r.Host + r.Path
+	// Two contiguous runs rather than the ring's iterator; see Vector. base
+	// carries the logical index across the wrap, for Group.FirstCall.
+	front, back := s.calls.parts()
+	base := 0
+	for _, seg := range [2][]Call{front, back} {
+		for j := range seg {
+			c, i := &seg[j], base+j
 
-		out.Calls++
-		if _, dup := seen[key]; !dup {
-			seen[key] = struct{}{}
-			out.Distinct++
-		}
+			// Normalised once at Observe; see Call.res.
+			r := c.res
+			if r.Empty() {
+				continue
+			}
+			key := r.Scheme + "://" + r.Host + r.Path
 
-		track(dirs, dirSeen, r.Dir, key, i)
-		track(roots, rootSeen, r.Root, key, i)
+			out.Calls++
+			if _, dup := seen[key]; !dup {
+				seen[key] = struct{}{}
+				out.Distinct++
+			}
+
+			track(dirs, dirSeen, r.Dir, key, i)
+			track(roots, rootSeen, r.Root, key, i)
+		}
+		base += len(seg)
 	}
 
 	out.Dirs = sortGroups(dirs)

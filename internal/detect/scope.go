@@ -185,34 +185,44 @@ func (s *Session) ScopeReport(sc Scope) ScopeReport {
 	rootSeen := make(map[string]map[string]struct{})
 	seen := make(map[string]struct{})
 
-	for i, c := range s.calls {
-		// Observe normalised this; a call whose target named no resource is
-		// not evidence of anything and is not counted as a place.
-		r := c.res
-		if r.Empty() {
-			continue
-		}
+	// Two contiguous runs rather than the ring's iterator; see Vector. base
+	// carries the logical index across the wrap, which is what FirstOutOfScope
+	// and Group.FirstCall mean.
+	front, back := s.calls.parts()
+	base := 0
+	for _, seg := range [2][]Call{front, back} {
+		for j := range seg {
+			c, i := &seg[j], base+j
 
-		out.Calls++
-		if sc.Contains(r) {
-			out.InScope++
-			continue
-		}
+			// Observe normalised this; a call whose target named no resource is
+			// not evidence of anything and is not counted as a place.
+			r := c.res
+			if r.Empty() {
+				continue
+			}
 
-		out.OutOfScope++
-		if sc.Escaped(r) {
-			out.Escaped++
-		}
-		if out.FirstOutOfScope < 0 {
-			out.FirstOutOfScope = i
-		}
+			out.Calls++
+			if sc.Contains(r) {
+				out.InScope++
+				continue
+			}
 
-		key := scopeKey(r)
-		if _, dup := seen[key]; !dup {
-			seen[key] = struct{}{}
-			out.Distinct++
+			out.OutOfScope++
+			if sc.Escaped(r) {
+				out.Escaped++
+			}
+			if out.FirstOutOfScope < 0 {
+				out.FirstOutOfScope = i
+			}
+
+			key := scopeKey(r)
+			if _, dup := seen[key]; !dup {
+				seen[key] = struct{}{}
+				out.Distinct++
+			}
+			track(roots, rootSeen, r.Root, key, i)
 		}
-		track(roots, rootSeen, r.Root, key, i)
+		base += len(seg)
 	}
 
 	out.Outside = sortGroups(roots)

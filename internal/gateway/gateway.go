@@ -255,6 +255,9 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 	assessment := g.assess()
 	scope := g.scopeReport()
 	outOfScope := g.outOfScope(targets)
+	// Read once. The policy request and the decision event both want it, and
+	// asking twice used to mean walking the whole session twice.
+	sessionTargets := g.distinctTargets()
 
 	decision := g.evaluate(policy.Request{
 		Tool:               params.Name,
@@ -262,7 +265,7 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 		Args:               params.Arguments,
 		Targets:            targets,
 		SessionCalls:       assessment.Calls,
-		SessionTargets:     g.distinctTargets(),
+		SessionTargets:     sessionTargets,
 		DecompositionScore: assessment.Score,
 		ScopeDeclared:      scope.Declared,
 		OutOfScope:         outOfScope,
@@ -284,7 +287,7 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 			Score:            assessment.Score,
 			ScoreUnavailable: assessment.BelowMinimum,
 			SessionCalls:     assessment.Calls,
-			SessionTargets:   g.distinctTargets(),
+			SessionTargets:   sessionTargets,
 
 			ScopeDeclared:     scope.Declared,
 			OutOfScope:        len(outOfScope),
@@ -520,7 +523,7 @@ func (g *Gateway) distinctTargets() int {
 	if g.opts.Detector == nil {
 		return 0
 	}
-	return int(g.opts.Detector.Vector().Get(detect.FeatTargetBreadth))
+	return g.opts.Detector.DistinctTargets()
 }
 
 func (g *Gateway) evaluate(req policy.Request) policy.Decision {

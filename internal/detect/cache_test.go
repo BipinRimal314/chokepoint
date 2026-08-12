@@ -7,7 +7,7 @@ import (
 
 // The cached resource is only sound while every path that puts a Call into
 // s.calls goes through Observe. Nothing in the type system enforces that — a
-// future `func (s *Session) Restore([]Call)` or a direct append inside eviction
+// future `func (s *Session) Restore([]Call)` or a direct push inside eviction
 // would compile fine and produce a session whose reports silently skip calls,
 // because an unparsed res is indistinguishable from "this target named no
 // resource". These tests are the enforcement.
@@ -23,7 +23,7 @@ func TestEveryRetainedCallCarriesItsParsedResource(t *testing.T) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i, c := range s.calls {
+	for i, c := range s.calls.all() {
 		want := ParseResource(c.Target)
 		if c.res != want {
 			t.Errorf("call %d (target %q): cached resource %+v, want %+v",
@@ -32,9 +32,10 @@ func TestEveryRetainedCallCarriesItsParsedResource(t *testing.T) {
 	}
 }
 
-// Eviction copies calls down the backing array. A copy that dropped the cache
-// would leave the oldest surviving calls invisible to every report, which is
-// precisely the window an operator investigating a long session is reading.
+// Eviction advances the ring head over the calls it drops, and pushing at the
+// cap overwrites a slot in place. Either one dropping the cache would leave the
+// oldest surviving calls invisible to every report, which is precisely the
+// window an operator investigating a long session is reading.
 func TestEvictionPreservesTheParsedResource(t *testing.T) {
 	s := NewSession(Config{MaxCalls: 3})
 	at := time.Date(2026, 8, 7, 10, 0, 0, 0, time.UTC)
@@ -56,7 +57,7 @@ func TestEvictionPreservesTheParsedResource(t *testing.T) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i, c := range s.calls {
+	for i, c := range s.calls.all() {
 		if c.res.Empty() {
 			t.Errorf("survivor %d (target %q) lost its parsed resource", i, c.Target)
 		}
