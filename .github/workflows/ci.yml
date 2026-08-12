@@ -23,10 +23,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # go.mod declares 1.24 as the minimum, so 1.24 is tested to prove that
-        # claim rather than assuming it. `stable` catches breakage from new
-        # releases before a user hits it.
-        go: ["1.24", "stable"]
+        # go.mod declares 1.25.0 as the minimum, so 1.25 is tested to prove
+        # that claim rather than assuming it. `stable` catches breakage from
+        # new releases before a user hits it. Keep this pinned entry in step
+        # with go.mod: naming a version below the directive does not test it,
+        # GOTOOLCHAIN just downloads the newer toolchain and the leg passes
+        # while proving nothing.
+        go: ["1.25", "stable"]
         os: [ubuntu-latest, macos-latest]
         include:
           # Windows differs in path handling and process teardown, both of
