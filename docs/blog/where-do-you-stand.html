@@ -1,0 +1,562 @@
+<!--
+  "Where do you stand?" — a plain-language piece on why stdio transport leaves
+  nowhere in the network to intercept an MCP session, the installer shape that
+  constraint forces, and the first real cluster run (see docs/first-cluster-run.md).
+
+  NOTE: this is a page *fragment*, not a standalone document. The doctype and
+  the outer document/head/body elements are deliberately absent — they are
+  supplied by the host that renders it. Opening this file directly in a browser
+  mostly works but is not what it is for. To self-host, wrap it in a normal
+  HTML skeleton.
+
+  Colours are CSS custom properties on :root, redefined for dark in both
+  prefers-color-scheme and [data-theme="dark"]; edit the tokens, not the rules.
+  The two diagrams are hand-authored inline SVG and take their accent from
+  var(--brass) via the .af / .as classes, so they follow the theme.
+-->
+<title>Where Do You Stand?</title>
+
+<style>
+  :root {
+    --ground:   #FBFAF7;
+    --surface:  #F1EFE9;
+    --surface2: #E7E3D9;
+    --ink:      #1A1814;
+    --muted:    #6B655A;
+    --rule:     #D8D2C6;
+    --brass:    #96651F;
+    --brass-dim:#C9A776;
+    --fault:    #B04A3A;
+    --good:     #416B44;
+
+    --measure: 66ch;
+    --s1: 0.5rem; --s2: 0.85rem; --s3: 1.4rem; --s4: 2.2rem; --s5: 3.6rem;
+
+    --serif: Georgia, "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #141311;
+      --surface:  #1E1C19;
+      --surface2: #272420;
+      --ink:      #EDE9E1;
+      --muted:    #9A9287;
+      --rule:     #35312B;
+      --brass:    #D9A05B;
+      --brass-dim:#8A6A3C;
+      --fault:    #E08573;
+      --good:     #8FB893;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:   #141311;
+    --surface:  #1E1C19;
+    --surface2: #272420;
+    --ink:      #EDE9E1;
+    --muted:    #9A9287;
+    --rule:     #35312B;
+    --brass:    #D9A05B;
+    --brass-dim:#8A6A3C;
+    --fault:    #E08573;
+    --good:     #8FB893;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 1.0625rem;
+    line-height: 1.68;
+    margin: 0;
+    padding: var(--s5) var(--s3) var(--s5);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: var(--measure);
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+  }
+
+  /* ---- masthead ---- */
+  .masthead { display: flex; flex-direction: column; gap: var(--s2); margin-bottom: var(--s3); }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--brass);
+    margin: 0;
+  }
+
+  h1 {
+    font-size: clamp(2.1rem, 6vw, 3.1rem);
+    line-height: 1.08;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .standfirst {
+    font-size: 1.2rem;
+    line-height: 1.5;
+    color: var(--muted);
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .byline {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--muted);
+    border-top: 1px solid var(--rule);
+    padding-top: var(--s2);
+    margin: 0;
+  }
+
+  /* ---- prose ---- */
+  h2 {
+    font-size: 1.5rem;
+    font-weight: 400;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: var(--s4) 0 0;
+  }
+
+  h3 {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: var(--s3) 0 0;
+  }
+
+  p { margin: 0; }
+
+  a { color: var(--brass); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; border-radius: 2px; }
+
+  strong { font-weight: 700; }
+
+  em.term { font-style: italic; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--surface);
+    padding: 0.1em 0.34em;
+    border-radius: 3px;
+  }
+
+  ul { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: var(--s1); }
+  li::marker { color: var(--brass-dim); }
+
+  /* ---- machine voice ---- */
+  .sh {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.6;
+    background: var(--surface);
+    border-left: 3px solid var(--brass);
+    padding: var(--s2) var(--s3);
+    overflow-x: auto;
+    white-space: pre;
+    margin: 0;
+    tab-size: 2;
+  }
+  .sh.fault { border-left-color: var(--fault); }
+  .sh .c { color: var(--muted); }
+  .sh .ok { color: var(--good); }
+  .sh .no { color: var(--fault); }
+  .sh .hi { color: var(--brass); }
+
+  .caption {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  /* ---- figures ---- */
+  figure {
+    margin: var(--s3) 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    /* diagrams read wider than the prose measure */
+    width: min(100%, 46rem);
+    margin-inline: calc(50% - min(50%, 23rem));
+  }
+  figure svg { width: 100%; height: auto; display: block; color: var(--ink); }
+  figure svg .as { stroke: var(--brass); }
+  figure svg .af { fill: var(--brass); }
+  figcaption {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--muted);
+    border-top: 1px solid var(--rule);
+    padding-top: var(--s1);
+  }
+
+  /* ---- pull ---- */
+  .pull {
+    font-size: 1.22rem;
+    line-height: 1.42;
+    color: var(--ink);
+    border-left: 3px solid var(--brass);
+    padding-left: var(--s3);
+    margin: var(--s3) 0;
+    text-wrap: balance;
+  }
+
+  /* ---- data table ---- */
+  .tablewrap { overflow-x: auto; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.5rem 0.7rem 0.5rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th {
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.68rem;
+    color: var(--muted);
+  }
+  td.num { text-align: right; padding-right: 1.2rem; white-space: nowrap; }
+
+  /* ---- closing note ---- */
+  .note {
+    background: var(--surface);
+    padding: var(--s3);
+    font-size: 0.94rem;
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+  }
+  .note strong { color: var(--ink); }
+
+  hr {
+    border: 0;
+    border-top: 1px solid var(--rule);
+    margin: var(--s4) 0 0;
+  }
+
+  @media (max-width: 46rem) {
+    body { padding: var(--s4) var(--s2); }
+    figure { margin-inline: 0; width: 100%; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Notes from a cluster · chokepoint</p>
+    <h1>Where do you stand?</h1>
+    <p class="standfirst">You want to put a guard in front of a program. The program has no front door. This is the whole problem, and everything else follows from it.</p>
+    <p class="byline">17 August 2026 · single-node k3s v1.36.3 · Arch Linux</p>
+  </header>
+
+  <p>Here is a puzzle. An AI agent is doing work on your machine — reading files, writing files, running searches. It does this by talking to a <em class="term">tool server</em>: a separate program that owns the actual filesystem access. You would like to watch that conversation. Better, you would like to be able to stop it: if the agent asks to read <code>~/.ssh/id_rsa</code>, you want something to say no.</p>
+
+  <p>So: where do you stand?</p>
+
+  <p>The instinct — and it is a good instinct, because it is right nearly everywhere else — is to stand in the network. That is what we always do. Traffic flows from A to B, you put a proxy in the middle, and now you see everything and can refuse anything. Every firewall, every service mesh, every API gateway is this idea. It works because there is a <strong>place</strong> to stand: a port, a socket, a hop.</p>
+
+  <p>Now the awkward part. The Model Context Protocol, which is how these agents talk to their tool servers, most commonly runs over something called <strong>stdio</strong>. Standard input and standard output. Pipes.</p>
+
+  <p>What that means concretely: the agent does not connect to the server. The agent <em class="term">launches</em> the server, as a child process, and they talk through the pipes that connect a parent to its child. There is no port. There is no socket. There is no packet that ever leaves the process pair.</p>
+
+  <p class="pull">There is no network hop, so there is nowhere in the network to stand. A proxy deployed beside this thing would have nothing on its stdin. It would proxy nothing, forever, quite successfully.</p>
+
+  <p>This is worth sitting with, because it is the kind of constraint that quietly invalidates a lot of received wisdom. You cannot sidecar your way out of it. You cannot point a Service at it. The usual shape of security infrastructure assumes a chokepoint exists in the network, and here one simply does not.</p>
+
+  <h2>So find a different constriction</h2>
+
+  <p>But notice what we <em class="term">do</em> have. The agent has to launch the server. That launch — the <code>exec</code> — is a real event, and it is a narrow one. Everything the agent is about to do goes through a program it is about to start.</p>
+
+  <p>So: be that program.</p>
+
+  <p>You tell the agent to launch <code>chokepoint</code> instead of the real server, and you hand chokepoint the real server's command line. chokepoint starts the real server as <em class="term">its own</em> child, and sits in the middle relaying bytes. Requests come down from the agent, chokepoint reads them, and either passes them along or refuses them and sends back a denial. The agent thinks it is talking to the filesystem server. The filesystem server thinks it is talking to the agent. Neither is wrong about anything that matters to them.</p>
+
+  <p>The network had no chokepoint, so we made one out of the process tree. That is where the name comes from.</p>
+
+  <figure>
+    <svg viewBox="0 0 720 400" role="img" aria-label="Two arrangements compared. In a network protocol there is a port between agent and server, so a proxy can sit in that gap. Over stdio the agent execs the server directly through pipes, so the only place to intervene is the exec chain itself.">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="af"/>
+        </marker>
+      </defs>
+
+      <!-- ROW A -->
+      <text x="0" y="16" font-family="ui-monospace, monospace" font-size="11" fill="currentColor" opacity="0.6" letter-spacing="1.4">IF IT SPOKE OVER A NETWORK</text>
+
+      <rect x="0" y="38" width="150" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="75" y="69" text-anchor="middle" font-family="ui-monospace, monospace" font-size="12" fill="currentColor">agent</text>
+
+      <rect x="285" y="38" width="150" height="52" rx="2" fill="none" class="as" stroke-width="2"/>
+      <text x="360" y="69" text-anchor="middle" font-family="ui-monospace, monospace" font-size="12" class="af">proxy</text>
+
+      <rect x="570" y="38" width="150" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="645" y="69" text-anchor="middle" font-family="ui-monospace, monospace" font-size="12" fill="currentColor">tool server</text>
+
+      <line x1="150" y1="64" x2="277" y2="64" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="435" y1="64" x2="562" y2="64" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="213" y="54" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity="0.75">tcp</text>
+      <text x="498" y="54" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity="0.75">tcp</text>
+
+      <text x="360" y="112" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" class="af">a port exists, so a gap exists</text>
+
+      <line x1="0" y1="152" x2="720" y2="152" stroke="currentColor" stroke-width="1" opacity="0.25"/>
+
+      <!-- ROW B -->
+      <text x="0" y="188" font-family="ui-monospace, monospace" font-size="11" fill="currentColor" opacity="0.6" letter-spacing="1.4">WHAT ACTUALLY HAPPENS — STDIO</text>
+
+      <rect x="0" y="212" width="150" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="75" y="243" text-anchor="middle" font-family="ui-monospace, monospace" font-size="12" fill="currentColor">agent</text>
+
+      <rect x="285" y="212" width="150" height="52" rx="2" fill="none" class="as" stroke-width="2"/>
+      <text x="360" y="237" text-anchor="middle" font-family="ui-monospace, monospace" font-size="12" class="af">chokepoint</text>
+      <text x="360" y="253" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9.5" class="af" opacity="0.8">parent of the server</text>
+
+      <rect x="570" y="212" width="150" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="645" y="243" text-anchor="middle" font-family="ui-monospace, monospace" font-size="12" fill="currentColor">tool server</text>
+
+      <!-- exec arrows -->
+      <line x1="150" y1="228" x2="277" y2="228" class="as" stroke-width="1.6" marker-end="url(#arb)"/>
+      <text x="213" y="220" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" class="af">exec</text>
+      <line x1="435" y1="228" x2="562" y2="228" class="as" stroke-width="1.6" marker-end="url(#arb)"/>
+      <text x="498" y="220" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" class="af">exec</text>
+
+      <!-- pipe arrows -->
+      <line x1="277" y1="252" x2="150" y2="252" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="213" y="270" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity="0.75">stdin / stdout</text>
+      <line x1="562" y1="252" x2="435" y2="252" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="498" y="270" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity="0.75">stdin / stdout</text>
+
+      <text x="360" y="308" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity="0.75">no port, no socket, no packet — nothing to intercept</text>
+      <text x="360" y="330" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" class="af">the only narrow place left is the exec itself</text>
+
+      <text x="0" y="378" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity="0.55">Consequence: the guard must already be inside the agent's container when it calls exec.</text>
+    </svg>
+    <figcaption>The interception moves from the network path to the process-spawn path. That one change is what dictates every deployment decision below.</figcaption>
+  </figure>
+
+  <h2>Which wrecks the deployment, in an interesting way</h2>
+
+  <p>Follow the consequence. If chokepoint has to be the process the agent spawns, then chokepoint has to be <em class="term">inside the agent's container</em> at the moment of spawning. Not in a pod next door. Not behind a Service. In the same filesystem namespace, on disk, ready to be executed.</p>
+
+  <p>Which means you do not deploy this thing. You <strong>deliver</strong> it.</p>
+
+  <p>That inverts how security tooling normally arrives. Usually the tool is a service and the workload talks to it. Here the tool is an artifact, and it has to be placed where other pods can pick it up. There is exactly one well-known Kubernetes pattern shaped like that, and it is the one CNI network plugins use: a DaemonSet whose job is to copy a file onto every node and then get out of the way.</p>
+
+  <p>So the DaemonSet does not run chokepoint. Read that again, because it is the part that confuses everyone: <code>chokepoint-installer</code> never proxies anything. An init container downloads the release, checks it, writes the binary to <code>/opt/chokepoint/bin</code> on the host, and exits. The pod that remains holds a <code>pause</code> container — a program whose entire purpose is to do nothing, cheaply, so that the pod stays alive and Kubernetes will re-run the install whenever the node reboots or the version changes.</p>
+
+  <figure>
+    <svg viewBox="0 0 720 430" role="img" aria-label="The installer DaemonSet downloads and verifies the release, writes the binary to a host path via an atomic rename, and agent pods in another namespace mount that path read-only and exec the binary in place of their tool server.">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="ar2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="af"/>
+        </marker>
+      </defs>
+
+      <rect x="230" y="0" width="260" height="44" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3"/>
+      <text x="360" y="27" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" fill="currentColor">GitHub release v0.1.0</text>
+
+      <line x1="360" y1="44" x2="360" y2="82" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar2)"/>
+      <text x="372" y="68" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity="0.75">download + sha256 -c</text>
+
+      <!-- namespace: chokepoint-system -->
+      <rect x="120" y="90" width="480" height="86" rx="2" fill="none" stroke="currentColor" stroke-width="1" opacity="0.35"/>
+      <text x="132" y="108" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity="0.6" letter-spacing="1.1">NS/ CHOKEPOINT-SYSTEM</text>
+      <rect x="140" y="116" width="200" height="46" rx="2" fill="none" class="as" stroke-width="1.8"/>
+      <text x="240" y="136" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" class="af">init: install</text>
+      <text x="240" y="152" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9.5" class="af" opacity="0.8">runs once, then exits</text>
+      <rect x="380" y="116" width="200" height="46" rx="2" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.6"/>
+      <text x="480" y="136" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" fill="currentColor" opacity="0.75">pause</text>
+      <text x="480" y="152" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9.5" fill="currentColor" opacity="0.6">keeps it reconciling</text>
+
+      <line x1="240" y1="176" x2="240" y2="214" class="as" stroke-width="1.6" marker-end="url(#ar2b)"/>
+      <text x="252" y="200" font-family="ui-monospace, monospace" font-size="10.5" class="af">mv -f  (atomic rename)</text>
+
+      <!-- the node -->
+      <rect x="0" y="222" width="720" height="56" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="16" y="243" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity="0.6" letter-spacing="1.1">THE NODE'S OWN DISK</text>
+      <text x="16" y="264" font-family="ui-monospace, monospace" font-size="12" class="af">/opt/chokepoint/bin/chokepoint</text>
+      <text x="480" y="264" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity="0.7">20 MB · 0755 · root</text>
+
+      <line x1="600" y1="278" x2="600" y2="316" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar2)"/>
+      <text x="612" y="302" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity="0.75">mount ro</text>
+
+      <!-- namespace: agents -->
+      <rect x="60" y="324" width="600" height="86" rx="2" fill="none" stroke="currentColor" stroke-width="1" opacity="0.35"/>
+      <text x="72" y="342" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity="0.6" letter-spacing="1.1">NS/ AGENTS — the agent pod</text>
+
+      <rect x="80" y="352" width="150" height="42" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="155" y="378" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" fill="currentColor">agent</text>
+
+      <line x1="230" y1="373" x2="292" y2="373" class="as" stroke-width="1.6" marker-end="url(#ar2b)"/>
+      <text x="261" y="365" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" class="af">exec</text>
+
+      <rect x="300" y="352" width="170" height="42" rx="2" fill="none" class="as" stroke-width="1.8"/>
+      <text x="385" y="378" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" class="af">chokepoint</text>
+
+      <line x1="470" y1="373" x2="532" y2="373" class="as" stroke-width="1.6" marker-end="url(#ar2b)"/>
+      <text x="501" y="365" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" class="af">exec</text>
+
+      <rect x="540" y="352" width="100" height="42" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="590" y="378" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" fill="currentColor">server</text>
+    </svg>
+    <figcaption>The installer stages an artifact and leaves. The interception happens later, in a different namespace, when an agent execs the staged binary instead of its tool server.</figcaption>
+  </figure>
+
+  <p>One detail in that diagram is doing more work than it looks. The install writes to a temporary name and then <code>mv -f</code>s it into place. Renaming within a single filesystem is atomic — the kernel guarantees it — so an agent that happens to exec during an upgrade gets either the whole old binary or the whole new one. Never half a file. Copy directly over the target instead and you have invented a rare, unreproducible crash.</p>
+
+  <h2>The part where you find out</h2>
+
+  <p>All of the above was designed, written, documented, and tested — and had never once run on a real cluster. That is an uncomfortable amount of confidence to hold on the strength of unit tests, so: k3s on a single node, four commands, and see.</p>
+
+  <p>Two applies, a wait, and a look at the log:</p>
+
+  <pre class="sh"><span class="c">$</span> kubectl apply -f 10-installer-daemonset.yaml
+namespace/chokepoint-system created
+daemonset.apps/chokepoint-installer created
+
+<span class="c">$</span> kubectl apply -f 20-policy-configmap.yaml
+namespace/agents created
+configmap/chokepoint-policy created
+configmap/agent-mcp-config created
+
+<span class="c">$</span> kubectl -n chokepoint-system rollout status ds/chokepoint-installer
+daemon set "chokepoint-installer" successfully rolled out</pre>
+
+  <p>And then the moment of truth, which is two lines long:</p>
+
+  <pre class="sh"><span class="c">$</span> kubectl -n chokepoint-system logs ds/chokepoint-installer -c install
+chokepoint_0.1.0_linux_amd64.tar.gz: <span class="ok">OK</span>
+<span class="hi">chokepoint 0.1.0</span></pre>
+
+  <p>The second line is the one you go looking for. The first line is the one that matters more: that is <code>sha256sum -c</code> passing. The checksum was fetched, the archive was checked against it, and only then was anything unpacked. Unattended, inside the cluster, with nobody watching.</p>
+
+  <p>Was anything actually staged, though? A log line is a claim, not evidence. On the host:</p>
+
+  <pre class="sh"><span class="c">$</span> ls -la /opt/chokepoint/bin/
+-rwxr-xr-x root root 20M chokepoint
+
+<span class="c">$</span> /opt/chokepoint/bin/chokepoint --version
+chokepoint 0.1.0
+
+<span class="c">$</span> sha256sum /opt/chokepoint/bin/chokepoint
+<span class="hi">8b663bbb9d592a07882b259b301d7485ddaaceca3a425b529fe4590a3ac145b7</span></pre>
+
+  <p>Then, separately, pull the published archive by hand, verify it, unpack it, and compare. Byte-identical. The thing on the node is the thing that was released — not something like it.</p>
+
+  <p>Everything passed on the first attempt. Which is pleasant, and also slightly suspicious, because a test that has only ever succeeded has not told you very much.</p>
+
+  <h2>So break it deliberately</h2>
+
+  <p>The README makes a promise about failure. Point the installer at a version that does not exist, it says, and the install <em class="term">"fails loudly on a 404 rather than staging nothing quietly."</em></p>
+
+  <p>That is a good promise, and the quiet failure is exactly the one you would fear. Imagine it going the other way: you bump a version, the download 404s, the script shrugs, the pod reports success, and every agent on that node carries on execing a binary that is silently months out of date — or absent, so the agent falls back to running the tool server directly, with no guard at all. You would never look. The dashboard would be green.</p>
+
+  <p>So we set the version to <code>9.9.9</code>, which has never existed, and applied it.</p>
+
+  <pre class="sh fault"><span class="c">$</span> kubectl -n chokepoint-system rollout status ds/... --timeout=60s
+<span class="no">error: timed out waiting for the condition</span>   <span class="c">(rc=1)</span>
+
+<span class="c">$</span> kubectl -n chokepoint-system get pods
+NAME                         READY   STATUS         RESTARTS
+chokepoint-installer-cj8w8   0/1     <span class="no">Init:Error</span>     3
+
+<span class="c">$</span> kubectl ... logs ds/chokepoint-installer -c install
+<span class="no">wget: server returned error: HTTP/1.1 404 Not Found</span></pre>
+
+  <p>Loud at three separate levels, which is what you want, because different people look in different places. The rollout command exits non-zero, so CI catches it. The pod status says <code>Init:Error</code> with a climbing restart count, so a dashboard catches it. And the log says, in plain words, exactly what went wrong — so a human catches it.</p>
+
+  <p>That last one was not guaranteed. The script calls <code>wget -q</code>, and quiet mode in some implementations suppresses the error along with the progress bar. Had that been true here, the pod would have failed with a completely empty log — loud in status, mute in the one place the documentation tells you to look. It prints. But that is a property of this wget, not something the script enforces, and it is the kind of thing that changes underneath you when a base image is bumped.</p>
+
+  <p>Now the more important half. While the installer was failing and restarting, what happened to the binary already on the node?</p>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Property</th><th>Before</th><th>During failure</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>version</td><td class="num">chokepoint 0.1.0</td><td class="num">chokepoint 0.1.0</td></tr>
+        <tr><td>sha256</td><td class="num">8b663bbb…</td><td class="num">8b663bbb…</td></tr>
+        <tr><td>mtime</td><td class="num">17:46:53</td><td class="num">17:46:53</td></tr>
+        <tr><td>.chokepoint.tmp</td><td class="num">absent</td><td class="num">absent</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Untouched. Same bytes, same timestamp, still runs. The download fails before anything reaches the staging directory, so a botched upgrade cannot damage a working install — and it leaves no temporary file behind to confuse the next attempt. Agents on that node keep running the guard they already had. Setting the version back and re-applying brought the pod up clean and printed <code>chokepoint 0.1.0</code> again, which incidentally proves the reconcile claim too: changing that one environment variable really does re-run the install, in both directions.</p>
+
+  <h2>The first principle</h2>
+
+  <p>Feynman's line about science is that the first principle is that you must not fool yourself — and you are the easiest person to fool. It applies with unusual force to security tools, because a security tool that does not work looks exactly like a security tool that does, right up until it matters.</p>
+
+  <p>So here is the honest accounting for this one. chokepoint scores a session for how much it looks like a decomposed sweep — an agent quietly touching a very large number of things. The scoring has published, measured, unflattering limits:</p>
+
+  <ul>
+    <li><strong>It is blind to scale.</strong> One tool used against any number of distinct targets scores exactly <code>0.400</code>. Twenty targets, twenty thousand targets — same number. A threshold cannot separate what does not differ.</li>
+    <li><strong>Novelty falls off a cliff, not a slope.</strong> Over a looping vocabulary of twenty tools, the novelty signal reads <code>1.000</code> at twenty calls, <code>0.050</code> at forty, and <code>0.000</code> from sixty onward. A quarter of the scoring weight is inert for any session of real length.</li>
+    <li><strong>Being erratic makes you look worse, not better.</strong> Randomising which tool comes next <em class="term">raises</em> the score — <code>0.757</code> against <code>0.618</code> for the same vocabulary walked in a boring cycle. The evasive strategy and the sophisticated-looking strategy point in opposite directions.</li>
+    <li><strong>A bigger theft is not a louder one.</strong> Breadth saturates against session length, so the cost of hiding does not grow with the size of what you are taking.</li>
+  </ul>
+
+  <p>And the deployment has its own limits, which today's exercise did nothing to remove:</p>
+
+  <ul>
+    <li>The binary is trusted because of its checksum, and the checksum is served by the same host as the binary. That catches corruption. It does not catch a compromised release.</li>
+    <li>A hostPath is a hostPath. Any pod that can mount <code>/opt/chokepoint/bin</code> writable can replace the binary every agent on that node then execs.</li>
+    <li>Nothing here stops an agent from going around the proxy. An agent that can exec arbitrary commands can exec the tool server directly. This is a control on a configured path, not a sandbox.</li>
+  </ul>
+
+  <p class="pull">Inline enforcement buys you enforcement. It does not buy you detection. Standing in the doorway means you can refuse — it does not mean you can tell who you should be refusing.</p>
+
+  <p>That distinction is the actual result, and it is easy to lose. Being able to say no, at the exact moment a tool call is made, with the authority to make the refusal stick, is genuinely worth having; it is a different and better thing than reading a transcript afterwards and filing a report. But moving the detector into the request path does not make the detector smarter. The blind spots travel with it.</p>
+
+  <p>What we established today is narrower than it might look, and worth stating precisely: the delivery mechanism works. The binary arrives, it is verified before it is unpacked, it lands atomically, a bad version fails loudly without damaging a good install, and the whole thing reconciles. That is the foundation the interesting part sits on.</p>
+
+  <p>The interesting part is still untested. Staging a binary is not the same as intercepting anything. What has not yet happened on a real cluster is an actual agent pod execing that staged binary in place of its tool server, and a policy rule firing in anger — a denial, in-cluster, on a call that deserved one. That is the next thing to find out, and until it is found out, it should not be claimed.</p>
+
+  <hr>
+
+  <div class="note">
+    <p><strong>A note on the record.</strong> This was written after the fact, reconstructed from the repository and the session that produced it, which is a slightly dishonest way to write a lab notebook — the reasoning reads cleaner here than it did at the time. The commands and their output are verbatim. The order in which anyone understood any of it was messier.</p>
+    <p>Version <code>0.1.0</code>, commit <code>7ef8363</code>. The cluster was single-node k3s, so anything about multi-node behaviour above is inference, not measurement. Figures on the detector's limits are the ones published in the project's README; a separate analysis with results not yet public is deliberately not included here.</p>
+  </div>
+
+</div>

@@ -49,6 +49,14 @@ kubectl -n chokepoint-system logs ds/chokepoint-installer -c install | tail -1
 # chokepoint 0.1.0
 ```
 
+Use `--timeout` on that `rollout status`. If the pods are never admitted — Pod
+Security Admission rejecting the `hostPath` is the likely reason — it blocks
+rather than failing, which reads as a hang.
+
+Both paths above have been exercised on a real cluster, including the 404. What
+was measured, and what is still only inference, is recorded in
+[docs/first-cluster-run.md](../../docs/first-cluster-run.md).
+
 ## Wiring an agent
 
 Four things, and only four:
