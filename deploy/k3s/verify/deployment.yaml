@@ -1,0 +1,123 @@
+# 30-agent-deployment.yaml with the placeholder image replaced by something
+# that actually runs. The four wiring elements are unchanged: read-only
+# hostPath carrying the binary, the policy mount, the metrics port, and the
+# scrape annotations.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: interception-test
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: interception-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: interception-test
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: interception-test
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: "/metrics"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # So the emptyDir carrying the audit log is writable by the unprivileged
+        # user the container runs as.
+        fsGroup: 65532
+
+      initContainers:
+        - name: wait-for-chokepoint
+          image: alpine:3.22
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              for _ in $(seq 1 60); do
+                if [ -x /opt/chokepoint/bin/chokepoint ]; then
+                  /opt/chokepoint/bin/chokepoint --version
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "chokepoint was not staged on this node after 120s;" >&2
+              echo "check the chokepoint-installer DaemonSet" >&2
+              exit 1
+          volumeMounts:
+            - name: chokepoint-bin
+              mountPath: /opt/chokepoint/bin
+              readOnly: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+
+      containers:
+        - name: agent
+          image: python:3.13-alpine
+          command: ["python3", "-u", "/opt/testkit/driver.py"]
+          ports:
+            - name: metrics
+              containerPort: 9464
+          env:
+            - name: MCP_CONFIG
+              value: /etc/mcp/mcp.json
+          volumeMounts:
+            - name: chokepoint-bin
+              mountPath: /opt/chokepoint/bin
+              readOnly: true
+            - name: policy
+              mountPath: /etc/chokepoint
+              readOnly: true
+            - name: mcp-config
+              mountPath: /etc/mcp
+              readOnly: true
+            - name: testkit
+              mountPath: /opt/testkit
+              readOnly: true
+            - name: audit
+              mountPath: /var/log/chokepoint
+            - name: workspace
+              mountPath: /workspace
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+
+      volumes:
+        - name: chokepoint-bin
+          hostPath:
+            path: /opt/chokepoint/bin
+            type: Directory
+        - name: policy
+          configMap:
+            name: chokepoint-policy
+        - name: mcp-config
+          configMap:
+            name: agent-mcp-config-test
+        - name: testkit
+          configMap:
+            name: agent-testkit
+        - name: audit
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}

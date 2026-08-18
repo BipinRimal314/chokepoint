@@ -53,9 +53,11 @@ Use `--timeout` on that `rollout status`. If the pods are never admitted — Pod
 Security Admission rejecting the `hostPath` is the likely reason — it blocks
 rather than failing, which reads as a hang.
 
-Both paths above have been exercised on a real cluster, including the 404. What
-was measured, and what is still only inference, is recorded in
-[docs/first-cluster-run.md](../../docs/first-cluster-run.md).
+Both paths above have been exercised on a real cluster, including the 404, and
+so has interception itself — an agent pod exec'ing the staged binary, five
+policy rules producing real refusals, and a policy that does not compile taking
+the agent down with it. What was measured, and what is still only inference, is
+recorded in [docs/first-cluster-run.md](../../docs/first-cluster-run.md).
 
 ## Wiring an agent
 
@@ -68,6 +70,11 @@ Four things, and only four:
    the step that actually inserts the proxy; the mounts do nothing on their
    own. `agent-mcp-config` in `20-policy-configmap.yaml` shows the shape.
 4. Expose `9464` and let Prometheus scrape it.
+
+To check the wiring rather than assume it, `verify/` is a runnable version of
+step 3 against a mock server: it spawns the staged binary, runs a scripted
+session, and reports whether each call got the verdict the policy specifies.
+See [verify/README.md](verify/README.md).
 
 Introduce it the way the README describes: **no `--policy` at first**. Run it
 transparently, watch `--report` and the audit log for a few days, and write

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "/opt/chokepoint/bin/chokepoint",
+      "args": [
+        "--policy", "/etc/chokepoint/policy.yaml",
+        "--metrics-addr", ":9464",
+        "--audit-log", "/var/log/chokepoint/decisions.jsonl",
+        "--report",
+        "--",
+        "python3", "/opt/testkit/mock_mcp_server.py"
+      ]
+    }
+  }
+}
