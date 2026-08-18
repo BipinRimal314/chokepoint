@@ -573,12 +573,14 @@ chokepoint --policy policy.yaml \
   -- npx -y @modelcontextprotocol/server-filesystem /srv
 ```
 
-Scraped mid-session during a 40-call sweep against the example policy:
+Scraped mid-session during a 40-call sweep against the example policy. The
+sweep stays inside the declared workspace, so it is recorded rather than
+refused — see [the sweep rule](#why-this-exists)
+above:
 
 ```
-chokepoint_tool_calls_total{effect="allow",tool="read_file"} 7
-chokepoint_tool_calls_total{effect="deny",tool="read_file"}  3
-chokepoint_policy_denials_total{rule="halt-decomposed-sweep",tool="grep"} 4
+chokepoint_tool_calls_total{effect="allow",tool="read_file"} 10
+chokepoint_policy_audits_total{rule="watch-decomposed-sweep"} 15
 chokepoint_decomposition_score 0.6115384615384616
 chokepoint_session_calls   40
 chokepoint_session_targets 40
