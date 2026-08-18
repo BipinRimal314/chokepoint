@@ -36,7 +36,7 @@ kubectl apply -f 20-policy-configmap.yaml
 kubectl apply -f 30-agent-deployment.yaml
 ```
 
-`CHOKEPOINT_VERSION` in `10-installer-daemonset.yaml` defaults to `0.1.0`,
+`CHOKEPOINT_VERSION` in `10-installer-daemonset.yaml` defaults to `0.2.0`,
 which is published. Point it at a different release by editing that value and
 nothing else; if the tag does not exist the install fails loudly on a 404
 rather than staging nothing quietly.
@@ -46,7 +46,7 @@ Confirm the stage landed:
 ```sh
 kubectl -n chokepoint-system rollout status ds/chokepoint-installer
 kubectl -n chokepoint-system logs ds/chokepoint-installer -c install | tail -1
-# chokepoint 0.1.0
+# chokepoint 0.2.0
 ```
 
 Use `--timeout` on that `rollout status`. If the pods are never admitted — Pod
