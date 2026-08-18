@@ -241,3 +241,113 @@ func TestSweepStructureTable(t *testing.T) {
 			steal, pad, measureRootSpread(s).entropy, float64(steal+pad)/float64(steal))
 	}
 }
+
+// TestSweepRuleCorroboration checks the fix for the false positive the table
+// above exposed: the sweep rule now needs the session to have left its declared
+// workspace before it denies, because no threshold on the score alone separates
+// thorough work from theft.
+//
+// The workspace here is the one an operator would plausibly declare for each
+// session — that is the whole point of the mechanism, and modelling it as
+// "wherever this agent's own work lives" is what an operator does.
+func TestSweepRuleCorroboration(t *testing.T) {
+	w := DefaultWeights()
+
+	workspaces := map[string][]string{
+		"benign/one-project":      {"/project"},
+		"benign/project+strays":   {"/project"},
+		"benign/multi-repo":       {"/work"},
+		"benign/ci-build":         {"/src", "/build", "/cache", "/tmp"},
+		"benign/sysadmin-audit":   {"/etc", "/var", "/usr", "/opt"},
+		"benign/lint-repo":        {"/work"},
+		"attack/one-root-sweep":   {"/project"},
+		"attack/multiroot-even":   {"/project"},
+		"attack/multiroot-padded": {"/project"},
+	}
+
+	t.Logf("%-24s %-7s %6s %8s %-6s %-6s", "shape", "actual", "score", "outScope", "old", "new")
+	var oldWrong, newWrong int
+	for _, sh := range sweepShapes() {
+		s := sweepSession(sh.pairs)
+		a := s.Assess(w)
+
+		sc, err := NewScope(workspaces[sh.name])
+		if err != nil {
+			t.Fatalf("%s: scope: %v", sh.name, err)
+		}
+		outOfScope := s.ScopeReport(sc).Distinct
+
+		wide := a.Score > sweepRuleScore && s.DistinctTargets() > sweepRuleTargets
+		old := wide
+		new := wide && outOfScope > 0
+
+		actual := "attack"
+		if sh.benign {
+			actual = "benign"
+		}
+		if old != !sh.benign {
+			oldWrong++
+		}
+		if new != !sh.benign {
+			newWrong++
+		}
+		verdict := func(deny bool) string {
+			if deny {
+				return "DENY"
+			}
+			return "allow"
+		}
+		t.Logf("%-24s %-7s %6.3f %8d %-6s %-6s",
+			sh.name, actual, a.Score, outOfScope, verdict(old), verdict(new))
+	}
+	t.Logf("")
+	t.Logf("sweep rule alone: %d/%d wrong    with corroboration: %d/%d wrong",
+		oldWrong, len(sweepShapes()), newWrong, len(sweepShapes()))
+
+	// Two things worth asserting rather than printing, both properties of the
+	// rule rather than of these fixtures.
+	//
+	// First: corroboration can only ever narrow. Adding a conjunct cannot deny
+	// something the score alone allowed, so the change cannot introduce a new
+	// false positive whatever shape a session has.
+	//
+	// Second: the specific false positive this fixes stays fixed. benign/lint-repo
+	// scores 0.603 -- above the threshold, higher than any attack shape here --
+	// and is denied by the score alone.
+	for _, sh := range sweepShapes() {
+		s := sweepSession(sh.pairs)
+		a := s.Assess(w)
+		sc, err := NewScope(workspaces[sh.name])
+		if err != nil {
+			t.Fatalf("%s: scope: %v", sh.name, err)
+		}
+		wide := a.Score > sweepRuleScore && s.DistinctTargets() > sweepRuleTargets
+		corroborated := wide && s.ScopeReport(sc).Distinct > 0
+		if corroborated && !wide {
+			t.Errorf("%s: corroborated rule denied what the score alone allowed", sh.name)
+		}
+		if sh.name == "benign/lint-repo" {
+			if !wide {
+				t.Errorf("lint-repo no longer trips the score alone (%.3f); "+
+					"this test no longer demonstrates the false positive it was written for", a.Score)
+			}
+			if corroborated {
+				t.Error("lint-repo is still denied: the false positive is not fixed")
+			}
+		}
+	}
+
+	// What corroboration does not fix, recorded so it is not mistaken for
+	// solved: a benign session can legitimately leave its workspace.
+	// benign/project+strays reads /etc/hosts and a CA certificate, and escapes
+	// this rule only because its score is 0.400. A straying benign session that
+	// also scored above the threshold would still be denied -- though the
+	// example policy's outside-declared-workspace rule would have denied those
+	// two calls first, which is a separate question about that policy.
+	s := sweepSession(sweepShapes()[1].pairs)
+	sc, _ := NewScope(workspaces["benign/project+strays"])
+	if got := s.ScopeReport(sc).Distinct; got == 0 {
+		t.Error("expected benign/project+strays to stray; it no longer does, " +
+			"so the caveat above is untested")
+	}
+}
