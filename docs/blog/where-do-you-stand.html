@@ -1,7 +1,8 @@
 <!--
   "Where do you stand?" — a plain-language piece on why stdio transport leaves
   nowhere in the network to intercept an MCP session, the installer shape that
-  constraint forces, and the first real cluster run (see docs/first-cluster-run.md).
+  constraint forces, and the two cluster runs that tested it — delivery on
+  17 Aug 2026, interception on 18 Aug (see docs/first-cluster-run.md).
 
   NOTE: this is a page *fragment*, not a standalone document. The doctype and
   the outer document/head/body elements are deliberately absent — they are
@@ -277,7 +278,7 @@
     <p class="eyebrow">Notes from a cluster · chokepoint</p>
     <h1>Where do you stand?</h1>
     <p class="standfirst">You want to put a guard in front of a program. The program has no front door. This is the whole problem, and everything else follows from it.</p>
-    <p class="byline">17 August 2026 · single-node k3s v1.36.3 · Arch Linux</p>
+    <p class="byline">17–18 August 2026 · single-node k3s v1.36.3 · Arch Linux</p>
   </header>
 
   <p>Here is a puzzle. An AI agent is doing work on your machine — reading files, writing files, running searches. It does this by talking to a <em class="term">tool server</em>: a separate program that owns the actual filesystem access. You would like to watch that conversation. Better, you would like to be able to stop it: if the agent asks to read <code>~/.ssh/id_rsa</code>, you want something to say no.</p>
@@ -523,6 +524,86 @@ chokepoint-installer-cj8w8   0/1     <span class="no">Init:Error</span>     3
 
   <p>Untouched. Same bytes, same timestamp, still runs. The download fails before anything reaches the staging directory, so a botched upgrade cannot damage a working install — and it leaves no temporary file behind to confuse the next attempt. Agents on that node keep running the guard they already had. Setting the version back and re-applying brought the pod up clean and printed <code>chokepoint 0.1.0</code> again, which incidentally proves the reconcile claim too: changing that one environment variable really does re-run the install, in both directions.</p>
 
+  <h2>None of which is the point</h2>
+
+  <p>Everything so far is about a file arriving on a machine. Verified, atomic, reconciling, failing loudly — all true, and all of it describes a package manager. It says nothing whatsoever about whether the program does its job once it is there. It is entirely possible to build a flawless delivery pipeline for a guard that, on arrival, guards nothing.</p>
+
+  <p>So the next day, the actual question: does an agent pod exec that staged binary instead of its tool server, and does a rule fire?</p>
+
+  <p>Setting this up has a trap in it that is worth pointing out, because it is the trap most likely to catch a real deployment. The obvious way to write this test is to have the test spawn chokepoint and talk to it. That test always passes. It also proves nothing, because the thing most likely to go wrong in a real cluster is not chokepoint failing — it is chokepoint never being invoked. You mount the binary, you mount the policy, you feel protected, and the agent's config still names the tool server directly. Every mount is correct. The proxy is not in the path.</p>
+
+  <p>So the stand-in agent here reads the same <code>mcp.json</code> a real client would read, and launches whatever that file names. If the wiring is wrong, it talks straight to the server, everything is permitted, and the test fails loudly instead of passing for the wrong reason.</p>
+
+  <h3>Who is whose child</h3>
+
+  <p>The claim under the entire design is that interception happens by process ancestry. That is checkable directly. From inside the running pod, reading <code>/proc</code>:</p>
+
+  <pre class="sh"><span class="c">pid=1   ppid=0</span>  python3 -u /opt/testkit/driver.py
+<span class="c">pid=7   ppid=1</span>  <span class="hi">/opt/chokepoint/bin/chokepoint</span> --policy /etc/chokepoint/policy.yaml …
+<span class="c">pid=18  ppid=7</span>  python3 /opt/testkit/mock_mcp_server.py</pre>
+
+  <p>Read the middle column. The agent's child is chokepoint. chokepoint's child is the tool server. There is no arrangement of those three processes in which the agent reaches the server without passing through pid 7 — not because a rule forbids it, but because the pipe goes where it goes. And the binary at pid 7 is the one the DaemonSet staged the day before, from the hostPath, unchanged.</p>
+
+  <p>That is the doorway, and something is standing in it.</p>
+
+  <h3>Seven calls</h3>
+
+  <p>Now make it refuse things. The session is seven tool calls, each one aimed at a specific rule in the policy:</p>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>The agent asks to…</th><th>Verdict</th><th>Because</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>read a file in its workspace</td><td class="num">allow</td><td>— the control</td></tr>
+        <tr><td>read an SSH private key</td><td class="num">deny</td><td><code>no-credential-paths</code></td></tr>
+        <tr><td>read the pod's Kubernetes token</td><td class="num">deny</td><td><code>no-serviceaccount-token</code></td></tr>
+        <tr><td>read <code>/etc/passwd</code></td><td class="num">deny</td><td><code>outside-declared-workspace</code></td></tr>
+        <tr><td>reach cloud metadata at <code>169.254.169.254</code></td><td class="num">deny</td><td><code>no-cloud-metadata</code></td></tr>
+        <tr><td>read that same workspace file again</td><td class="num">deny</td><td><code>tool-definition-changed</code></td></tr>
+        <tr><td>write a file in its workspace</td><td class="num">allow</td><td>audited by <code>watch-writes</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Seven for seven, in-cluster, against the staged binary. But do not skim past the first row. A test in which everything is denied is not a test — a proxy that has crashed into a closed pipe denies everything too, and produces a table that looks exactly like success. The allowed call is what distinguishes enforcement from breakage.</p>
+
+  <p>Now look at rows one and six. They are the same call. Byte for byte, the same tool, the same path, the same arguments. Allowed the first time, refused the second.</p>
+
+  <p>Nothing about the agent changed between them. What changed is that the <em class="term">server</em> quietly rewrote its own description of the tool — same name, same schema, same everything a program would validate — while altering the natural-language instructions that a language model actually reads and obeys. This is a real attack shape, and a nasty one, because every individual call remains perfectly well-formed. There is nothing wrong with the request. The wrongness is in what the tool now claims to be.</p>
+
+  <pre class="sh fault"><span class="c">level=WARN msg=</span><span class="no">"tool definition changed since first listing"</span> <span class="c">tool=</span>read_file
+  <span class="c">kind=</span>modified <span class="c">listing=</span>2
+  <span class="c">was=</span>f435ed4344fe7fb5…  <span class="c">now=</span>dfa786ba87ee16a4…</pre>
+
+  <p>The proxy holds the server to what it published the first time it was asked. It cannot know whether the first description was honest — it can only know that this one is different, and that nobody approved the change.</p>
+
+  <p>Meanwhile the metrics endpoint served forty-five series to a scrape from a completely separate pod, and the audit log held seven lines for seven calls — allows recorded alongside denials, which is the half people forget. A log that only records refusals cannot tell you what an agent actually did on the day you need to know.</p>
+
+  <h2>Break that too</h2>
+
+  <p>Same discipline as before: the documentation makes a promise about failure, so go and collect on it. The promise this time is that a policy which does not compile stops the agent rather than quietly waving it through.</p>
+
+  <p>This is the failure that should frighten you most. A typo in a rule is not an exotic event; it is a Tuesday. And the tempting, friendly behaviour — log a warning, skip the broken rule, keep serving — produces an agent running with protection its operator is certain is in place. So: break one rule's syntax, mount it, apply.</p>
+
+  <pre class="sh fault"><span class="c">$</span> kubectl -n agents rollout status deploy/... --timeout=60s
+<span class="no">error: timed out waiting for the condition</span>   <span class="c">(rc=1)</span>
+
+<span class="c">$</span> kubectl -n agents get pods
+interception-broken-policy-…   0/1   <span class="no">CrashLoopBackOff</span>   3
+
+<span class="c">$</span> kubectl -n agents logs deploy/... -c agent
+<span class="no">chokepoint: load policy: rule "watch-writes": ERROR: &lt;input&gt;:1:18: Syntax error:</span>
+ | tool.startsWith( || tool.startsWith("delete")
+ | .................<span class="no">^</span></pre>
+
+  <p>It names the rule and points at the column, which is the difference between a five-minute fix and an hour of bisecting a YAML file. But the more interesting part is what happens to the agent. The proxy exits. The pipe closes. The agent process dies with it.</p>
+
+  <p class="pull">A broken configuration produces an agent with no tools at all — not an agent with unguarded ones. The failure is closed.</p>
+
+  <p>Which is the right way round, and I want to be precise about why it happens, because it would be easy to award chokepoint credit it has not earned. That behaviour is a property of the <em class="term">arrangement</em>, not of the program. It fails closed because the agent's only route to a tool server runs through a process that refused to start. An MCP client that responded to a failed launch by falling back to spawning the server directly would convert this exact same event into a silent bypass — green agent, working tools, no guard. Nothing in this design prevents that. It is a property of the client you happen to be running.</p>
+
   <h2>The first principle</h2>
 
   <p>Feynman's line about science is that the first principle is that you must not fool yourself — and you are the easiest person to fool. It applies with unusual force to security tools, because a security tool that does not work looks exactly like a security tool that does, right up until it matters.</p>
@@ -544,19 +625,38 @@ chokepoint-installer-cj8w8   0/1     <span class="no">Init:Error</span>     3
     <li>Nothing here stops an agent from going around the proxy. An agent that can exec arbitrary commands can exec the tool server directly. This is a control on a configured path, not a sandbox.</li>
   </ul>
 
+  <p>And the cluster run said so itself, in a way I did not plan and rather like. Every metric came back populated — calls, denials, audits, targets — except one:</p>
+
+  <pre class="sh">chokepoint_policy_denials_total{rule=<span class="hi">"tool-definition-changed"</span>}  1
+chokepoint_tool_calls_total{effect=<span class="no">"deny"</span>}                       5
+chokepoint_session_targets                                     6
+chokepoint_decomposition_score                               <span class="c">NaN</span></pre>
+
+  <p>Not zero. <code>NaN</code> — the detector declining to answer, because seven calls is not a session and it will not pretend otherwise. That is the correct behaviour, and reporting <code>0.0</code> instead would have been a small lie of exactly the kind that gets believed: a dashboard reading zero looks like an agent behaving well, not like a question nobody asked.</p>
+
+  <p>But sit with what the run therefore demonstrated. Every rule that fired was a deterministic one — this path, that prefix, this definition changed. The behavioural detector, which is the part with the research in it, never spoke at all. The enforcement machinery works. The judgement it is supposed to enforce did not get tested, because it had nothing to judge.</p>
+
   <p class="pull">Inline enforcement buys you enforcement. It does not buy you detection. Standing in the doorway means you can refuse — it does not mean you can tell who you should be refusing.</p>
 
   <p>That distinction is the actual result, and it is easy to lose. Being able to say no, at the exact moment a tool call is made, with the authority to make the refusal stick, is genuinely worth having; it is a different and better thing than reading a transcript afterwards and filing a report. But moving the detector into the request path does not make the detector smarter. The blind spots travel with it.</p>
 
-  <p>What we established today is narrower than it might look, and worth stating precisely: the delivery mechanism works. The binary arrives, it is verified before it is unpacked, it lands atomically, a bad version fails loudly without damaging a good install, and the whole thing reconciles. That is the foundation the interesting part sits on.</p>
+  <p>So, precisely, what these two days established. The delivery mechanism works: the binary arrives, it is verified before it is unpacked, it lands atomically, a bad version fails loudly without damaging a good install, and the whole thing reconciles. And the guard works where it lands: it really is in the process path, it really does refuse, and it refuses a call it had allowed ten milliseconds earlier once the server changed its story.</p>
 
-  <p>The interesting part is still untested. Staging a binary is not the same as intercepting anything. What has not yet happened on a real cluster is an actual agent pod execing that staged binary in place of its tool server, and a policy rule firing in anger — a denial, in-cluster, on a call that deserved one. That is the next thing to find out, and until it is found out, it should not be claimed.</p>
+  <p>What they did not establish, stated with the same precision, because this is the half that gets quietly dropped:</p>
+
+  <ul>
+    <li><strong>The agent was a stand-in, and so was the server.</strong> Fifty lines of Python speaking JSON-RPC is not Claude Code, and a mock server is not <code>npx</code> pulling a real filesystem server with its own runtime requirements. The claim that a real client's config has the shape this deployment expects is still a claim.</li>
+    <li><strong>Only the deterministic rules ran.</strong> Path matching, scope containment, definition fingerprinting — yes. Anything that depends on the shape of a session over time — no. See the <code>NaN</code>.</li>
+    <li><strong>One node.</strong> Everything about how this behaves across a real cluster remains inference.</li>
+  </ul>
+
+  <p>None of which is a disappointing result. It is just a smaller one than "we tested it and it works", and the gap between those two sentences is where most security claims quietly go wrong. The next thing to find out is what happens when a real agent, running a real tool server, does something long and strange enough that the detector has to give an actual number — and whether that number is any good.</p>
 
   <hr>
 
   <div class="note">
     <p><strong>A note on the record.</strong> This was written after the fact, reconstructed from the repository and the session that produced it, which is a slightly dishonest way to write a lab notebook — the reasoning reads cleaner here than it did at the time. The commands and their output are verbatim. The order in which anyone understood any of it was messier.</p>
-    <p>Version <code>0.1.0</code>, commit <code>7ef8363</code>. The cluster was single-node k3s, so anything about multi-node behaviour above is inference, not measurement. Figures on the detector's limits are the ones published in the project's README; a separate analysis with results not yet public is deliberately not included here.</p>
+    <p>Version <code>0.1.0</code>; delivery run at commit <code>7ef8363</code>, interception run the following day at <code>064cce5</code>, against the same staged binary. The cluster was single-node k3s, so anything about multi-node behaviour above is inference, not measurement. Figures on the detector's limits are the ones published in the project's README; a separate analysis with results not yet public is deliberately not included here. The fixture that produced the seven-call session is in the repository under <code>deploy/k3s/verify/</code>, and the full measurement record — including the parts that went nowhere — is in <code>docs/first-cluster-run.md</code>.</p>
   </div>
 
 </div>
