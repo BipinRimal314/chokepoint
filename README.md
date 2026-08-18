@@ -775,6 +775,10 @@ Two things are left, and they are different kinds of thing.
   of the calls rather than statistics over their vocabulary. See
   [Known defect](#known-defect-a-single-tool-sweep-is-invisible).
 
+Those two, the smaller items behind them, and what is verified rather than
+merely tested, are kept in order in
+[docs/project-state.md](docs/project-state.md).
+
 ## License
 
 Apache-2.0
