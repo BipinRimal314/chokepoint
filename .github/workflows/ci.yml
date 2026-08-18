@@ -111,20 +111,32 @@ jobs:
           version: "~> v2"
           args: release --snapshot --clean --skip=announce
 
-      - name: Every documented platform produced an archive
-        # The k3s installer reconstructs an asset name from a version and
-        # `uname -m`; if the archive template or the target list changes, that
-        # installer starts 404ing on every node and nothing here would have
-        # noticed.
+      - name: Every documented platform produced an archive the installer can name
+        # deploy/k3s/10-installer-daemonset.yaml rebuilds an asset name as
+        # chokepoint_<version>_<os>_<arch>.tar.gz from CHOKEPOINT_VERSION and
+        # `uname -m`, so both separators around the version are load-bearing.
+        #
+        # Matching only the suffix was not enough to protect that: rename the
+        # template to chokepoint-<version>_linux_amd64.tar.gz and the archive
+        # still ends in _linux_amd64.tar.gz, so this step passed while every
+        # node would 404 on the next release. Pin the prefix goreleaser is
+        # asked to produce as well, and leave only the version free -- it has
+        # to be, since a snapshot build here versions itself differently from
+        # a tagged one.
         run: |
+          fail() {
+            echo "FAIL: $1"
+            echo "the installer reconstructs chokepoint_<version>_<os>_<arch>; dist has:"
+            ls -1 dist/*.tar.gz dist/*.zip 2>/dev/null || echo "  (no archives at all)"
+            exit 1
+          }
           for target in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
-            if ! ls dist/*_"$target".tar.gz >/dev/null 2>&1; then
-              echo "FAIL: no archive for $target"
-              exit 1
-            fi
+            ls dist/chokepoint_*_"$target".tar.gz >/dev/null 2>&1 \
+              || fail "no archive named chokepoint_<version>_$target.tar.gz"
           done
-          ls dist/*_windows_amd64.zip >/dev/null || { echo "FAIL: no windows archive"; exit 1; }
-          echo "all documented platforms present"
+          ls dist/chokepoint_*_windows_amd64.zip >/dev/null 2>&1 \
+            || fail "no archive named chokepoint_<version>_windows_amd64.zip"
+          echo "all documented platforms present, named as the installer expects"
 
   e2e:
     name: end-to-end
