@@ -62,7 +62,7 @@ spec:
             # The tag to install, without the leading "v". Must match a
             # published release; see .goreleaser.yaml for the asset naming.
             - name: CHOKEPOINT_VERSION
-              value: "0.1.0"
+              value: "0.2.0"
             - name: CHOKEPOINT_REPO
               value: "BipinRimal314/chokepoint"
           command: ["/bin/sh", "-eu", "-c"]

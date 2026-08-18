@@ -751,7 +751,14 @@ not to pass.
 
 ## Status
 
-Working and tested; released as `v0.1.0`, but not yet deployed anywhere real.
+Working and tested, and now exercised on a real cluster: `v0.2.0` installs via
+the k3s DaemonSet, and an agent pod in that cluster has been through a scripted
+session where five policy rules produced real refusals. What that run did and
+did not establish — the agent and the tool server were both stand-ins, and only
+the deterministic rule path ran — is written up in
+[docs/first-cluster-run.md](docs/first-cluster-run.md).
+
+Nobody is running it against a production agent yet.
 
 Everything stdio can support is built: policy, live scoring, the declared
 workspace, the session report, the evidence log, telemetry, tool-definition
