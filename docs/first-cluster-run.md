@@ -6,8 +6,9 @@ path, so that the next person to touch those manifests knows which claims are
 measured and which are still inference.
 
 Delivery was run on **17 August 2026** against `7ef8363`, release `v0.1.0`.
-Interception — the section below it — was run on **18 August 2026** against
-`064cce5`, on the same cluster and the same staged binary.
+Interception was run on **18 August 2026** against `064cce5`, on the same
+cluster and the same staged binary. The real upgrade, `v0.1.0` → `v0.2.0`, was
+run later the same day against `9bd8db4`.
 
 | | |
 | --- | --- |
@@ -64,8 +65,10 @@ $ sha256sum /opt/chokepoint/bin/chokepoint
 
 The published archive was then downloaded independently, verified against
 `checksums.txt`, unpacked, and compared: the staged binary is **byte-identical**
-to the released one. So the DaemonSet, the hostPath, the atomic rename and the
-version resolution all behave as documented.
+to the released one. So the DaemonSet, the hostPath and the version resolution
+all behave as documented. Not the atomic rename — there was nothing at the
+target path to replace, so that step was a rename onto empty space. See
+[Upgrading in place](#upgrading-in-place).
 
 ### Why Pod Security Admission did not bite
 
@@ -130,6 +133,35 @@ aggressively would leave the pod failing with an empty log — still loud in pod
 status, silent in the one place `deploy/k3s/README.md` tells the operator to
 look. If `alpine:3.22` moves, capture wget's stderr explicitly rather than
 relying on it.
+
+## Upgrading in place
+
+The failed upgrade above showed a good install surviving a bad one. The other
+direction — a real version change landing on a node that already had a working
+binary — was only tested once `v0.2.0` existed. Bump `CHOKEPOINT_VERSION` to
+`0.2.0`, re-apply the DaemonSet:
+
+| | before | after |
+| --- | --- | --- |
+| `--version` | `chokepoint 0.1.0` | `chokepoint 0.2.0` |
+| sha256 | `8b663bbb…` | `3af94174…` |
+| mtime | 17 Aug 17:46 | 18 Aug 17:07 |
+| `.chokepoint.tmp` | absent | absent |
+
+The install log printed `chokepoint_0.2.0_linux_amd64.tar.gz: OK` then
+`chokepoint 0.2.0`. The published archive was again downloaded independently,
+verified, unpacked and compared: **byte-identical** to what is now staged.
+`gh attestation verify` on that archive also passed, so the build provenance the
+main README points at is real for this release and not only configured.
+
+The interception fixture was then re-run against the new binary — 7/7, same as
+against `0.1.0`. So the loop closes: tag, release, node upgrades itself,
+enforcement still works.
+
+**What this does not show is atomicity.** No agent was mid-`exec` during the
+swap. The claim that a rename cannot hand anyone half a binary still rests on
+`rename(2)`'s guarantee rather than on anything observed here, and testing it
+properly means exec'ing in a loop while an upgrade lands.
 
 ## Interception
 
