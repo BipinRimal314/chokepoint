@@ -48,13 +48,23 @@ data:
           is the signature of a tool-poisoning attack. Stop and have an
           operator re-approve the server before using it again.
 
-      - name: halt-decomposed-sweep
+      # The score is evidence, not proof: recorded always, acted on only with
+      # corroboration. A wide, varied, low-repetition session is what thorough
+      # work looks like as well as what theft looks like, and no threshold
+      # separates them -- see docs/single-tool-sweep.md. Leaving the declared
+      # workspace is the corroboration. session_out_of_scope is zero when no
+      # workspace is declared, so the deny is inert there rather than guessing.
+      - name: watch-decomposed-sweep
         match: decomposition_score > 0.45 && session_targets > 25
+        effect: audit
+
+      - name: halt-decomposed-sweep
+        match: decomposition_score > 0.45 && session_targets > 25 && session_out_of_scope > 0
         effect: deny
         message: >-
           This session has touched an unusually broad set of targets with low
-          repetition, which matches a decomposed-task pattern. Narrow the task
-          or request an operator review.
+          repetition, and has already reached outside its declared workspace.
+          Narrow the task or request an operator review.
 
       - name: no-credential-paths
         match: targets.exists(t, t.contains("/.ssh/") || t.endsWith(".pem") || t.contains("/.aws/"))

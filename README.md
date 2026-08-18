@@ -66,12 +66,25 @@ where a decision can still change the outcome.
 The rule that motivates the whole project looks like this:
 
 ```yaml
-- name: halt-decomposed-sweep
+- name: watch-decomposed-sweep
   match: decomposition_score > 0.45 && session_targets > 25
+  effect: audit
+
+- name: halt-decomposed-sweep
+  match: decomposition_score > 0.45 && session_targets > 25 && session_out_of_scope > 0
   effect: deny
 ```
 
 Every call it blocks is, on its own, an ordinary read of an ordinary path.
+
+The score is recorded whenever it trips and acted on only with corroboration,
+because a wide, varied, low-repetition session is what thorough work looks like
+as well as what theft looks like — a linter rewriting a repository scores
+`0.603` while a single-tool sweep of identical breadth scores `0.400`, and no
+threshold sits between those. [docs/single-tool-sweep.md](docs/single-tool-sweep.md)
+has the measurements. Leaving the declared workspace is the corroboration, and
+`session_out_of_scope` is zero where no workspace is declared, so the deny is
+inert there rather than guessing.
 
 ## What it does
 
