@@ -57,7 +57,7 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
-    # Matches what deploy/k3s/daemonset-install.yaml reconstructs from a
+    # Matches what deploy/k3s/10-installer-daemonset.yaml reconstructs from a
     # version and `uname -m`. Changing this template breaks that installer.
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
