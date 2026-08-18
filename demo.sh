@@ -54,6 +54,13 @@ msgs = [
 # 5..44: blocked for WHAT THEY ADD UP TO. Every one of these is an ordinary
 # read of an ordinary path inside the workspace, and each would be allowed on
 # its own.
+#
+# Request 4 above is load-bearing for this, and not only as its own example.
+# halt-decomposed-sweep needs the session to have left its workspace before it
+# denies, because a wide in-scope session is what thorough work looks like too
+# (docs/single-tool-sweep.md). The traversal is what supplies that. Remove it
+# and this sweep is audited rather than stopped, which is the correct outcome
+# and a much less interesting demo.
 tools = ["read_file", "list_dir", "grep", "stat"]
 for i in range(40):
     msgs.append({"jsonrpc": "2.0", "id": i + 5, "method": "tools/call",

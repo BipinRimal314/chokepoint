@@ -197,10 +197,44 @@ jobs:
           # dropped on teardown.
           if total != 41:
               sys.exit(f"FAIL: expected 41 responses, got {total}")
-          # The decomposition rule must actually fire on a 40-target sweep,
-          # otherwise the policy is decorative.
-          if denied == 0:
-              sys.exit("FAIL: the sweep was never blocked")
+          # This sweep stays inside the declared workspace, and since
+          # docs/single-tool-sweep.md the score alone no longer denies -- a
+          # wide in-scope session is what thorough work looks like too. It
+          # must still be recorded.
+          if denied != 0:
+              sys.exit(f"FAIL: an in-workspace sweep was blocked ({denied} denials)")
+          if "watch-decomposed-sweep" not in open("proxy.log").read():
+              sys.exit("FAIL: the sweep was not even audited, so the policy is decorative")
+          PY
+
+      - name: Deny a sweep that leaves the workspace
+        # The other half of the same rule. Corroboration means the deny fires
+        # once the session has reached outside what it was given, so a sweep
+        # that never was inside must be stopped by name.
+        run: |
+          python3 - <<'PY' > out-of-scope.jsonl
+          import json
+          out = [{"jsonrpc":"2.0","id":0,"method":"initialize",
+                  "params":{"protocolVersion":"2025-06-18"}}]
+          tools = ["read_file","list_dir","grep","stat"]
+          for i in range(40):
+              out.append({"jsonrpc":"2.0","id":i+1,"method":"tools/call",
+                          "params":{"name":tools[i%4],
+                                    "arguments":{"path":f"/var/lib/other/f{i:03d}"}}})
+          for o in out:
+              print(json.dumps(o))
+          PY
+
+          ./chokepoint --policy examples/policy.yaml \
+            -- python3 testdata/mock_mcp_server.py \
+            < out-of-scope.jsonl > out-of-scope-responses.jsonl 2> out-of-scope.log
+
+          python3 - <<'PY'
+          import sys
+          log = open("out-of-scope.log").read()
+          if "halt-decomposed-sweep" not in log:
+              sys.exit("FAIL: a sweep outside the workspace was never denied by the sweep rule")
+          print("out-of-scope sweep denied by halt-decomposed-sweep")
           PY
 
       - name: Scrape metrics from a live session
@@ -265,12 +299,20 @@ jobs:
           denied = sum(float(v) for v in
                        re.findall(r'^chokepoint_tool_calls_total\{effect="deny"[^}]*\} ([0-9.e+-]+)$',
                                   text, re.M))
-          print(f"allowed={allowed} denied={denied} denials={total('chokepoint_policy_denials_total')}")
+          print(f"allowed={allowed} denied={denied} "
+                f"denials={total('chokepoint_policy_denials_total')} "
+                f"audits={total('chokepoint_policy_audits_total')}")
 
           if allowed + denied != 40:
               sys.exit(f"FAIL: counted {allowed + denied} tool calls, expected 40")
-          if denied == 0:
-              sys.exit("FAIL: the sweep was never denied, so the rule never fired")
+          # This sweep is inside the declared workspace, so since
+          # docs/single-tool-sweep.md it is audited rather than denied. The
+          # audit counter is what proves the rule fired.
+          audits = total("chokepoint_policy_audits_total")
+          if denied != 0:
+              sys.exit(f"FAIL: an in-workspace sweep was denied ({denied} calls)")
+          if audits == 0:
+              sys.exit("FAIL: the sweep was never audited, so the rule never fired")
           if "chokepoint_decomposition_score" not in text:
               sys.exit("FAIL: decomposition score not exported")
           if "chokepoint_abandoned_spans_total 0" not in text:
