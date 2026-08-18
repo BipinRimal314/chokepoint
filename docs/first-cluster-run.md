@@ -5,8 +5,9 @@ a cluster. This is the record of the first time it was, including the failure
 path, so that the next person to touch those manifests knows which claims are
 measured and which are still inference.
 
-Everything below was run on **17 August 2026** against `7ef8363`, release
-`v0.1.0`.
+Delivery was run on **17 August 2026** against `7ef8363`, release `v0.1.0`.
+Interception — the section below it — was run on **18 August 2026** against
+`064cce5`, on the same cluster and the same staged binary.
 
 | | |
 | --- | --- |
@@ -130,15 +131,141 @@ status, silent in the one place `deploy/k3s/README.md` tells the operator to
 look. If `alpine:3.22` moves, capture wget's stderr explicitly rather than
 relying on it.
 
+## Interception
+
+Everything above concerns a file arriving on a node. This is the first time the
+file was used for what it is for. The fixture is `deploy/k3s/verify/`, which is
+`30-agent-deployment.yaml` with the placeholder image replaced by one that runs
+and the upstream pointed at `testdata/mock_mcp_server.py`.
+
+### The proxy is genuinely in the path
+
+The claim underneath the whole deployment is process-tree interception. Read
+from `/proc` inside the running pod:
+
+```
+pid=1   ppid=0   python3 -u /opt/testkit/driver.py
+pid=7   ppid=1   /opt/chokepoint/bin/chokepoint --policy /etc/chokepoint/policy.yaml …
+pid=18  ppid=7   python3 /opt/testkit/mock_mcp_server.py
+```
+
+The agent's child is chokepoint; chokepoint's child is the server. The server
+is not reachable from the agent except through pid 7, and the binary at pid 7
+is the hostPath the DaemonSet staged. That is the architecture asserted in
+`deploy/k3s/README.md`, observed rather than argued.
+
+The driver reads `mcp.json` instead of hard-coding the command, which matters:
+if that config named the server directly, the driver would talk straight to it
+and every deny below would fail open. The test can therefore detect the single
+most likely deployment mistake.
+
+### Rules produce real refusals
+
+```
+PASS  read a workspace file                             want=allow got=allow
+PASS  read an ssh private key                           want=deny  got=deny
+PASS  read the pod's serviceaccount token               want=deny  got=deny
+PASS  read outside the declared workspace               want=deny  got=deny
+PASS  reach cloud instance metadata                     want=deny  got=deny
+PASS  read the same workspace file, after the rug pull  want=deny  got=deny
+PASS  write inside the workspace (audit rule)           want=allow got=allow
+
+driver: 7/7 as policy specifies
+```
+
+Five distinct rules fired, one audited, one allowed. The allowed call is not
+filler — without it, a proxy that denied everything, or one that had crashed
+into a closed pipe, would produce a table that looked like success.
+
+The sixth line is the result worth having. It is the same call as the first,
+and it is allowed the first time and denied the second. The agent did not
+change its behaviour; the server changed its own tool description between the
+two listings, keeping the name and schema identical. chokepoint held it to what
+it published first:
+
+```
+level=WARN msg="tool definition changed since first listing" tool=read_file
+  kind=modified listing=2
+  was=f435ed4344fe7fb5… now=dfa786ba87ee16a4…
+```
+
+### Metrics and the audit log
+
+Scraped from inside the pod, and independently from a second pod at
+`10.42.0.19:9464` — 45 `chokepoint_` series, so the per-pod scrape target
+described in `deploy/k3s/README.md` is reachable the way a Prometheus would
+reach it:
+
+```
+chokepoint_policy_denials_total{rule="no-cloud-metadata",tool="read_file"}        1
+chokepoint_policy_denials_total{rule="no-credential-paths",tool="read_file"}      1
+chokepoint_policy_denials_total{rule="no-serviceaccount-token",tool="read_file"}  1
+chokepoint_policy_denials_total{rule="outside-declared-workspace",tool="read_file"} 1
+chokepoint_policy_denials_total{rule="tool-definition-changed",tool="read_file"}  1
+chokepoint_policy_audits_total{rule="watch-writes"}                               1
+chokepoint_tool_calls_total{effect="deny",tool="read_file"}                       5
+chokepoint_tool_calls_total{effect="allow",tool="read_file"}                      1
+chokepoint_tool_calls_total{effect="allow",tool="write_file"}                     1
+chokepoint_session_targets                                                        6
+chokepoint_decomposition_score                                                  NaN
+```
+
+`/healthz` answered `200 ok`, which is what the readiness probe used, so the pod
+did not go Ready until the proxy was serving. The audit log held **7 lines for 7
+calls** — allows as well as denials, in OTLP/JSON, one span each.
+
+**The `NaN` is not a bug and is the most instructive number here.** The
+decomposition detector declines to report a score for a seven-call session
+rather than emitting `0.0`, which would read as "this session looks fine". That
+is the right behaviour and it is also the limit of this test: what was verified
+in-cluster is the *deterministic* rule path. The behavioural detector — the part
+the research is about — was never given enough of a session to speak.
+
+### A policy that does not compile stops the agent
+
+`20-policy-configmap.yaml` claims a bad edit surfaces as a `CrashLoopBackOff`
+rather than an agent running with protection its operator imagines is in place.
+Verified by breaking one rule's CEL and mounting it in place of the policy:
+
+```
+$ kubectl -n agents rollout status deploy/... --timeout=60s
+error: timed out waiting for the condition          (rc=1)
+
+$ kubectl -n agents get pods
+interception-broken-policy-…   0/1   CrashLoopBackOff   3
+
+$ kubectl -n agents logs deploy/... -c agent
+chokepoint: load policy: rule "watch-writes": ERROR: <input>:1:18: Syntax error:
+ | tool.startsWith( || tool.startsWith("delete")
+ | .................^
+```
+
+The rule is named and the column is pointed at, which is what makes this
+recoverable at 3am. Note what happens to the agent: the proxy exits, the pipe
+closes, and the driver dies with it. **The failure is closed** — a
+misconfigured deployment yields an agent with no tool server at all, not an
+agent with an unprotected one.
+
+That property belongs to this arrangement, not to chokepoint. An MCP client
+that falls back to spawning the server directly when its configured command
+fails would convert the same event into a silent bypass.
+
 ## What this does not establish
 
-The delivery mechanism works. That is all it shows, and the distinction is
-worth keeping sharp:
+Delivery works and interception works. Neither statement is as broad as it
+sounds, and the distinction is worth keeping sharp:
 
-- **No interception was tested.** Staging a binary is not proxying anything. An
-  agent pod exec'ing the staged binary in place of its MCP server, and a policy
-  rule producing an actual denial in-cluster, has still never run.
-  `30-agent-deployment.yaml` was deliberately not applied — it is a template.
+- **The agent was a stand-in, and so was the server.** `driver.py` is fifty
+  lines that speak JSON-RPC; no real MCP client has been wired through this
+  deployment, and the claim that `mcp.json`'s shape matches what Claude Code
+  and the reference clients read is still an assertion. The upstream was the
+  mock, not `npx @modelcontextprotocol/server-filesystem` — so nothing here
+  confirms a real server's own runtime is present in an agent image, which is
+  the trap `30-agent-deployment.yaml` warns about.
+- **Only the deterministic rules ran.** Path matching, scope containment and
+  tool fingerprinting were exercised. The decomposition score, the workspace
+  rate window, and every threshold rule that depends on session length were
+  not; see the `NaN` above.
 - **Single node only.** Multi-node scheduling, tolerations against real taints,
   and per-node staging are untested.
 - **The trust caveats in `deploy/k3s/README.md` are unchanged.** The checksum
