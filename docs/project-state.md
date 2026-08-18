@@ -71,6 +71,16 @@ human-in-the-loop consent rendering.
    statistics over their vocabulary. That is a research problem, not a port.
    See [Known defect](../README.md#known-defect-a-single-tool-sweep-is-invisible).
 
+   **Started; the first candidate was refuted.** Root dispersion survives a
+   constant tool sequence and does not saturate with scale, but it flags a CI
+   build as readily as a theft. Evidence, and the one remaining candidate, in
+   [single-tool-sweep.md](single-tool-sweep.md).
+
+   It also turned up a live false positive worth fixing ahead of any research: a
+   benign wide session that varies its tools is denied, while a single-tool
+   sweep of identical breadth is allowed. That ordering is backwards regardless
+   of what happens to the score.
+
 2. **Streamable-HTTP transport.** Unblocks four controls at once and is
    well-scoped engineering rather than research.
 
