@@ -290,9 +290,12 @@ either always catches or never does.
 
 Fixing this *in the score* needs a signal that survives a constant tool
 sequence — the dependency-graph structure of the calls rather than their
-vocabulary statistics. That is not done. The honest statement about the score
-is unchanged: chokepoint scores *how varied* an attack is, and an attacker who
-declines to vary pays nothing. `TestSingleToolSweepIsUnderThreshold` pins the
+vocabulary statistics. That is not done — one candidate was tried and refuted,
+and [docs/single-tool-sweep.md](docs/single-tool-sweep.md) records why, along
+with a false positive it turned up: a benign wide session that varies its tools
+is denied, while a single-tool sweep of identical breadth is allowed. The
+honest statement about the score is unchanged: chokepoint scores *how varied* an
+attack is, and an attacker who declines to vary pays nothing. `TestSingleToolSweepIsUnderThreshold` pins the
 defect so it cannot be silently fixed without rewriting this section.
 
 **What does stop it is a [declared workspace](#declaring-a-workspace)**, and
