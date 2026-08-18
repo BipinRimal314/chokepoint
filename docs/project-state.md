@@ -50,6 +50,37 @@ the fixture is seven calls, which correctly reports no score at all.
 Full evidence, including the parts that went nowhere, is in
 [`first-cluster-run.md`](first-cluster-run.md).
 
+## What the sweep rule now does, and why it changed
+
+The rule the project is built around no longer denies on the decomposition
+score alone. It audits on the score and denies only once the session has also
+left its declared workspace.
+
+This is worth understanding before editing the example policy, because it is a
+deliberate loss as well as a fix. **An in-workspace sweep is now audited rather
+than blocked.** The measurements say a wide, varied, low-repetition session is
+what thorough work looks like as much as what theft looks like — a linter
+rewriting a repository scored `0.603` and was denied, while a single-tool sweep
+of identical breadth scored `0.400` and passed. The bands are inverted, not
+merely overlapping, so no threshold repairs it and the score cannot carry a
+deny by itself.
+
+`session_out_of_scope` is zero where no workspace is declared, so on such a
+deployment the deny is inert and the audit is all that remains. That is the
+honest outcome rather than a gap: with no boundary declared there is nothing to
+corroborate against.
+
+Two consequences worth knowing before changing things:
+
+- **`demo.sh` depends on its own traversal.** Request 4 leaves the workspace
+  before the sweep begins, which is what supplies the corroboration. Remove it
+  and the demo's sweep is audited rather than stopped.
+- **CI pins both halves.** The end-to-end job asserts an in-workspace sweep is
+  allowed *and* audited, and that a sweep outside the workspace is denied by
+  `halt-decomposed-sweep` by name. Loosening either direction fails the build.
+
+Reasoning and measurements: [single-tool-sweep.md](single-tool-sweep.md).
+
 ## What is blocked rather than pending
 
 Four controls need a transport that carries the thing being checked, and stdio
@@ -71,15 +102,23 @@ human-in-the-loop consent rendering.
    statistics over their vocabulary. That is a research problem, not a port.
    See [Known defect](../README.md#known-defect-a-single-tool-sweep-is-invisible).
 
-   **Started; the first candidate was refuted.** Root dispersion survives a
-   constant tool sequence and does not saturate with scale, but it flags a CI
-   build as readily as a theft. Evidence, and the one remaining candidate, in
-   [single-tool-sweep.md](single-tool-sweep.md).
+   **Started; the first candidate was refuted, and the fallout was acted on.**
+   Root dispersion survives a constant tool sequence and does not saturate with
+   scale, but it flags a CI build as readily as a theft. Evidence, and the one
+   remaining candidate, in [single-tool-sweep.md](single-tool-sweep.md).
 
-   It also turned up a live false positive worth fixing ahead of any research: a
-   benign wide session that varies its tools is denied, while a single-tool
-   sweep of identical breadth is allowed. That ordering is backwards regardless
-   of what happens to the score.
+   The investigation also exposed a false positive that has since been fixed:
+   the sweep rule denied a benign wide session that varied its tools while
+   allowing a single-tool sweep of identical breadth. The rule now audits on the
+   score and denies only with corroboration from the declared workspace. **Read
+   the trade before touching it:** an in-workspace sweep is no longer denied,
+   which is deliberate, because the measurements say it cannot be told apart
+   from thorough work.
+
+   The remaining candidate needs response-body inspection — whether a target was
+   discovered from a previous result or arrived from outside the session. That
+   is a larger change than anything attempted so far, and this proxy does not
+   read result bodies today.
 
 2. **Streamable-HTTP transport.** Unblocks four controls at once and is
    well-scoped engineering rather than research.
@@ -92,11 +131,19 @@ human-in-the-loop consent rendering.
    JSON-RPC `_meta` object) for newer ones. Hard-coding either is the mistake
    available here.
 
-3. **A longer in-cluster fixture.** The current one exercises the deterministic
+3. **Add wide benign shapes to the calibration corpus.** Its three benign
+   shapes touch 1, 3 and 3 targets and its three attack shapes touch 60, so
+   target count alone separates it perfectly and any signal correlated with
+   breadth scores full marks there while proving nothing. That gap is why the
+   false positive went unmeasured for so long. `calibrationShapes` is shared
+   with the paper-data generator, so changing it moves published figures — a
+   deliberate decision, not a drive-by edit.
+
+4. **A longer in-cluster fixture.** The current one exercises the deterministic
    rules and leaves the detector silent. A session long enough to produce a real
    score would test the part the research is about, in the place it is deployed.
 
-4. **Capture `wget`'s stderr explicitly** in `10-installer-daemonset.yaml`. The
+5. **Capture `wget`'s stderr explicitly** in `10-installer-daemonset.yaml`. The
    404 message is visible only because busybox's `wget` prints HTTP errors
    despite `-q`. That is a property of `alpine:3.22`, not of the script — if the
    base image moves, the pod fails with an empty log, silent in exactly the
@@ -112,6 +159,11 @@ human-in-the-loop consent rendering.
   keep saying `0.1.0` because that is the version they were run against.
   Updating measurements after the fact to match a later release is how a lab
   notebook becomes fiction.
+- **Fixtures an author invents can refute a signal, not establish one.**
+  Confirming a signal against them proves only that the author's benign class
+  matched the author's expectations, which is how the ASI02 claim went wrong
+  elsewhere in this work. `TestSweepStructureTable` therefore prints and asserts
+  nothing; only properties that hold for any session are assertions.
 - **The deployment fails closed, but that is a property of the arrangement,**
   not of chokepoint. An MCP client that falls back to spawning the tool server
   directly when its configured command fails would turn the same event into a
