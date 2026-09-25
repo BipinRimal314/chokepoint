@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -260,4 +261,34 @@ func jsonEqual(a, b any) bool {
 	x, _ := json.Marshal(a)
 	y, _ := json.Marshal(b)
 	return string(x) == string(y)
+}
+
+// TestResolvePath pins where relative and rooted paths land. On Windows a
+// rooted path belongs to the drive, not to the working folder: joining it
+// onto the folder put "/etc/hosts" inside the workspace.
+func TestResolvePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		for in, want := range map[string]string{
+			`/etc/hosts`:  `C:\etc\hosts`,
+			`\etc\hosts`:  `C:\etc\hosts`,
+			`src\main.go`: `C:\proj\src\main.go`,
+			`D:\x`:        `D:\x`,
+		} {
+			if got := resolvePath(in, `C:\proj`); got != want {
+				t.Errorf("resolvePath(%q) = %q, want %q", in, got, want)
+			}
+		}
+		return
+	}
+	for in, want := range map[string]string{
+		"/etc/hosts":  "/etc/hosts",
+		"src/main.go": "/proj/src/main.go",
+		".":           "/proj",
+		"../x":        "/x",
+		"https://a.b": "https://a.b",
+	} {
+		if got := resolvePath(in, "/proj"); got != want {
+			t.Errorf("resolvePath(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

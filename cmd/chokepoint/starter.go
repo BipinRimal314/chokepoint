@@ -61,7 +61,7 @@ rules:
         t.matches("(^|[/\\\\])(chokepoint\\.yaml|\\.mcp\\.json|\\.mcp\\.json\\.chokepoint-backup|claude_desktop_config\\.json)$") ||
         t.matches("(^|[/\\\\])\\.(claude|cursor)([/\\\\]|$)") ||
         t.startsWith(%[3]s) ||
-        (%[3]s.startsWith(t + "/") &&
+        ((%[3]s.startsWith(t + "/") || %[3]s.startsWith(t + "\\")) &&
           (tool.matches("(?i)(delete|remove|move|rename)") ||
            (tool == "Bash" && args.command.matches("(^|[\\s;&|(])(rm|mv|rmdir|shred|unlink)(\\s|$)")))))
     effect: deny
