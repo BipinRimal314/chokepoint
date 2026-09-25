@@ -383,6 +383,29 @@ func TestTraversalOutOfWorkspaceIsDenied(t *testing.T) {
 	}
 }
 
+// TestBatchedReadOutOfWorkspaceIsDenied pins batched targets end to end: one batched call
+// must not carry a path the same server's single-file tool would be denied.
+func TestBatchedReadOutOfWorkspaceIsDenied(t *testing.T) {
+	pol := mustPolicy(t, scopedPolicy)
+	g := New(Options{
+		Policy:   pol,
+		Scope:    mustScope(t, pol),
+		Detector: detect.NewSession(detect.Config{}),
+	})
+
+	got := intercept(t, g, toolCall(t, 1, "read_multiple_files",
+		map[string]any{"paths": []any{"/srv/data/a", "/etc/shadow"}}))
+	if got.Decision != proxy.Reject {
+		t.Error("a batched read reaching outside the workspace was forwarded")
+	}
+
+	got = intercept(t, g, toolCall(t, 2, "read_multiple_files",
+		map[string]any{"paths": []any{"/srv/data/a", "/srv/data/b"}}))
+	if got.Decision != proxy.Forward {
+		t.Error("a batched read inside the workspace was denied")
+	}
+}
+
 // TestScopeFactsAreAbsentWithoutAWorkspace pins the default. A deployment that
 // declared no working set must see no scope facts at all, so that a policy
 // copied from a scoped deployment fails inert rather than closed.

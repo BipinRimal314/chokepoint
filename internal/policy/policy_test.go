@@ -256,6 +256,24 @@ func TestExtractTargets(t *testing.T) {
 	}
 }
 
+// TestExtractTargetsReadsArrays pins batched targets. The reference
+// filesystem server's read_multiple_files takes {"paths": [...]}, and a batch
+// that yields no targets skips every scope and content rule at once.
+func TestExtractTargetsReadsArrays(t *testing.T) {
+	args := map[string]any{
+		"paths": []any{"/etc/shadow", "/home/u/.ssh/id_rsa", ""},
+		"files": []any{"/srv/a", map[string]any{"path": "/srv/b"}},
+		"path":  []any{"/srv/c"},
+		"tags":  []any{"not-a-target"},
+	}
+
+	got := ExtractTargets(args)
+	want := []string{"/etc/shadow", "/home/u/.ssh/id_rsa", "/srv/a", "/srv/b", "/srv/c"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("targets = %v, want %v", got, want)
+	}
+}
+
 func TestExtractTargetsIsDeterministic(t *testing.T) {
 	// Map iteration order is randomised; an audit record that reorders between
 	// runs over identical input is not usable as evidence.

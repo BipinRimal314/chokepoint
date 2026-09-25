@@ -409,6 +409,12 @@ var targetKeys = map[string]bool{
 	"uri": true, "url": true, "host": true, "hostname": true,
 	"resource": true, "target": true, "directory": true, "dir": true,
 	"query": true, "table": true, "key": true, "bucket": true,
+	// Plurals carry batches. The reference filesystem server's
+	// read_multiple_files takes {"paths": [...]}; without these, one batched
+	// call reads any number of files with no target recorded at all.
+	"paths": true, "files": true, "filenames": true, "file_paths": true,
+	"uris": true, "urls": true, "hosts": true, "hostnames": true,
+	"resources": true, "targets": true, "directories": true, "dirs": true,
 }
 
 func collect(v any, depth, maxDepth int, out map[string]struct{}) {
@@ -420,9 +426,17 @@ func collect(v any, depth, maxDepth int, out map[string]struct{}) {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, val := range t {
-			if s, ok := val.(string); ok && targetKeys[strings.ToLower(k)] && s != "" {
-				out[s] = struct{}{}
-				continue
+			if targetKeys[strings.ToLower(k)] {
+				if s, ok := val.(string); ok {
+					if s != "" {
+						out[s] = struct{}{}
+					}
+					continue
+				}
+				if items, ok := val.([]any); ok {
+					collectStrings(items, depth+1, maxDepth, out)
+					continue
+				}
 			}
 			collect(val, depth+1, maxDepth, out)
 		}
@@ -430,5 +444,22 @@ func collect(v any, depth, maxDepth int, out map[string]struct{}) {
 		for _, item := range t {
 			collect(item, depth+1, maxDepth, out)
 		}
+	}
+}
+
+// collectStrings takes every non-empty string in a list held under a target
+// key as a target, and walks anything else in it as ordinary arguments.
+func collectStrings(items []any, depth, maxDepth int, out map[string]struct{}) {
+	if depth > maxDepth {
+		return
+	}
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			if s != "" {
+				out[s] = struct{}{}
+			}
+			continue
+		}
+		collect(item, depth+1, maxDepth, out)
 	}
 }
