@@ -106,6 +106,16 @@ inert there rather than guessing.
   `effect="violation_allowed"`, and in the audit log with
   `chokepoint.policy.enforced=false`. Nothing records a monitored breach as a
   block.
+- **Fails closed on what it cannot read.** With a policy loaded, a request
+  whose keys repeat (exactly or up to case, `arguments` and `Arguments`) is
+  refused as `ambiguous-request`, and one whose params do not decode as
+  `malformed-request`, before any rule runs. Go's JSON decoder folds case and
+  keeps the last duplicate while most servers match exactly, so without this
+  chokepoint could check one call while the server ran another. In enforce
+  mode a message that is not valid JSON-RPC at all is answered with a parse
+  error, not forwarded. `resources/read` is checked like a tool call
+  (`tool == "resources/read"`, its `uri` as the target), since a `file://`
+  resource reaches the same places a file tool does.
 - **Denials are protocol-correct.** A blocked call returns a well-formed
   JSON-RPC error with a matching id and an explanation. The connection stays
   up; a policy decision is not an outage.

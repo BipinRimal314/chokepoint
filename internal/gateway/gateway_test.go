@@ -252,21 +252,75 @@ func TestErrorResponseIsRecordedAsPeripheral(t *testing.T) {
 	}
 }
 
-func TestMalformedParamsAreForwardedNotRejected(t *testing.T) {
-	// The upstream server owns its tool schemas; chokepoint must not become a
-	// second, divergent validator.
+// TestUnreadableRequestsFailClosed pins the parser-differential defences. A
+// call chokepoint cannot read exactly as the server will is refused, since
+// forwarding what was never checked is failing open. Each case was a working
+// bypass or an unchecked path before.
+func TestUnreadableRequestsFailClosed(t *testing.T) {
+	cases := map[string]string{
+		// Go's decoder folds case and keeps the last duplicate, so chokepoint
+		// checked /srv/data/ok while a case-sensitive server read /etc/shadow.
+		"case-variant arguments": `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/etc/shadow"},"Arguments":{"path":"/srv/data/ok"}}}`,
+		"case-variant method":    `{"jsonrpc":"2.0","id":1,"method":"tools/call","Method":"ping","params":{"name":"read_file","arguments":{"path":"/etc/shadow"}}}`,
+		"exact duplicate key":    `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/srv/data/ok","path":"/etc/shadow"}}}`,
+		"params do not decode":   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"not-an-object"}`,
+	}
+	for name, raw := range cases {
+		pol := mustPolicy(t, scopedPolicy)
+		g := New(Options{Policy: pol, Scope: mustScope(t, pol), Detector: detect.NewSession(detect.Config{})})
+		msg, err := jsonrpc.Parse([]byte(raw))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := intercept(t, g, msg); got.Decision != proxy.Reject {
+			t.Errorf("%s: decision = %v, want Reject", name, got.Decision)
+		}
+	}
+}
+
+// TestUnreadableRequestsInMonitorMode pins that the built-in rules follow the
+// switch like any other: forwarded, and recorded as violations.
+func TestUnreadableRequestsInMonitorMode(t *testing.T) {
+	obs := &recordingObserver{}
 	g := New(Options{
 		Policy:   mustPolicy(t, "default_effect: allow\nrules: []\n"),
 		Detector: detect.NewSession(detect.Config{}),
+		Observer: obs,
+		Monitor:  true,
 	})
-
-	raw := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"not-an-object"}`)
-	msg, err := jsonrpc.Parse(raw)
+	msg, err := jsonrpc.Parse([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"not-an-object"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := intercept(t, g, msg); got.Decision != proxy.Forward {
-		t.Errorf("decision = %v, want Forward", got.Decision)
+		t.Fatalf("decision = %v, want Forward", got.Decision)
+	}
+	if len(obs.decisions) != 1 || obs.decisions[0].Rule != RuleMalformedRequest || !obs.decisions[0].Unenforced {
+		t.Errorf("decisions = %+v", obs.decisions)
+	}
+	if g.SessionReport().Violations[RuleMalformedRequest] != 1 {
+		t.Error("violation not in the session report")
+	}
+}
+
+// TestResourceReadIsCheckedAgainstTheWorkspace pins that resources/read, which
+// reaches files through a URI, gets the same boundary as a file tool.
+func TestResourceReadIsCheckedAgainstTheWorkspace(t *testing.T) {
+	pol := mustPolicy(t, scopedPolicy)
+	g := New(Options{Policy: pol, Scope: mustScope(t, pol), Detector: detect.NewSession(detect.Config{})})
+	read := func(id int, uri string) proxy.Decision {
+		raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "resources/read", "params": map[string]any{"uri": uri}})
+		msg, err := jsonrpc.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return intercept(t, g, msg).Decision
+	}
+	if got := read(1, "file:///etc/shadow"); got != proxy.Reject {
+		t.Error("a resource read outside the workspace was forwarded")
+	}
+	if got := read(2, "file:///srv/data/notes.txt"); got != proxy.Forward {
+		t.Error("a resource read inside the workspace was refused")
 	}
 }
 

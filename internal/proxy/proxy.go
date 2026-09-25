@@ -110,6 +110,11 @@ type Options struct {
 	// replying after the client has closed its end. Zero uses
 	// DefaultDrainGrace.
 	DrainGrace time.Duration
+	// RejectUnparseable answers a client message that does not parse with a
+	// JSON-RPC parse error instead of forwarding it. Set when a policy is
+	// enforced: a server with a more lenient parser (Python's json accepts
+	// NaN, which Go refuses) would otherwise run a call nothing checked.
+	RejectUnparseable bool
 }
 
 // DefaultDrainGrace is how long an upstream gets to answer outstanding
@@ -270,12 +275,21 @@ func (s *Session) pump(ctx context.Context, dir Direction, src io.Reader, dst *j
 // handle applies the interceptor to one message and routes the outcome.
 func (s *Session) handle(ctx context.Context, dir Direction, raw []byte, dst *jsonrpc.Writer) error {
 	msg, parseErr := jsonrpc.Parse(raw)
+	if parseErr != nil && dir == ClientToServer && s.opts.RejectUnparseable {
+		s.reportError(dir, fmt.Errorf("refusing unparseable message: %w", parseErr))
+		reply, err := jsonrpc.ErrorResponse(nil, jsonrpc.CodeParseError,
+			"blocked by chokepoint: message is not valid JSON-RPC", nil)
+		if err != nil {
+			return err
+		}
+		return s.clientW.WriteRaw(reply)
+	}
 	if parseErr != nil {
 		// Something unparseable is not necessarily an attack — it may be a
-		// protocol extension this build predates. Forwarding it unchanged
-		// keeps the proxy transparent and lets the real endpoint decide,
-		// which is the same thing a network router does with a packet it does
-		// not understand.
+		// protocol extension this build predates. Without an enforced policy,
+		// forwarding it unchanged keeps the proxy transparent and lets the
+		// real endpoint decide. Server output is always forwarded: the
+		// agent's own parser is the one that has to accept it.
 		s.reportError(dir, fmt.Errorf("forwarding unparseable message: %w", parseErr))
 		return dst.WriteRaw(raw)
 	}

@@ -14,9 +14,11 @@
 package jsonrpc
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Version is the only JSON-RPC version MCP uses.
@@ -148,4 +150,75 @@ func ErrorResponse(id json.RawMessage, code int, message string, data any) ([]by
 		"id":      id,
 		"error":   errObj,
 	})
+}
+
+// Ambiguity reports the first object key in the message that another key in
+// the same object duplicates, exactly or up to case, or "" if there is none.
+//
+// This closes a parser differential. Go's encoding/json matches field names
+// case-insensitively and keeps the last duplicate, while MCP servers in other
+// languages match exactly. A request carrying both "arguments" and
+// "Arguments" is therefore read as two different calls: chokepoint checks
+// one, the server runs the other. No conforming client sends duplicate keys,
+// so a request that has them is refused rather than guessed at.
+//
+// Keys are compared the way encoding/json folds them, which includes U+017F
+// (long s) matching "s" and U+212A (Kelvin sign) matching "k".
+func (m *Message) Ambiguity() string {
+	dec := json.NewDecoder(bytes.NewReader(m.Raw))
+	dec.UseNumber()
+
+	type frame struct {
+		object bool
+		keys   map[string]string
+		// wantKey is true when the next string token in an object is a key.
+		wantKey bool
+	}
+	var stack []*frame
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			// io.EOF at the end, or a syntax error Parse would already have
+			// refused. Either way there is nothing further to compare.
+			return ""
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			switch t {
+			case '{':
+				if top != nil && top.object {
+					top.wantKey = true
+				}
+				stack = append(stack, &frame{object: true, keys: map[string]string{}, wantKey: true})
+			case '[':
+				if top != nil && top.object {
+					top.wantKey = true
+				}
+				stack = append(stack, &frame{})
+			default:
+				stack = stack[:len(stack)-1]
+			}
+		case string:
+			if top != nil && top.object && top.wantKey {
+				folded := strings.ToLower(strings.ToUpper(t))
+				if prev, dup := top.keys[folded]; dup {
+					return fmt.Sprintf("key %q duplicates %q", t, prev)
+				}
+				top.keys[folded] = t
+				top.wantKey = false
+				continue
+			}
+			if top != nil && top.object {
+				top.wantKey = true
+			}
+		default:
+			if top != nil && top.object {
+				top.wantKey = true
+			}
+		}
+	}
 }

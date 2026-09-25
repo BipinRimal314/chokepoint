@@ -309,7 +309,8 @@ func run(cfg config) error {
 		ServerIn:  serverIn,
 		ServerOut: serverOut,
 	}, proxy.Options{
-		Interceptor: gw,
+		Interceptor:       gw,
+		RejectUnparseable: pol != nil && pol.Mode == policy.ModeEnforce,
 		OnError: func(dir proxy.Direction, err error) {
 			logger.Debug("proxy note", "direction", dir.String(), "error", err)
 		},

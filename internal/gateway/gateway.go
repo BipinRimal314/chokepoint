@@ -230,12 +230,40 @@ func (g *Gateway) Intercept(_ context.Context, dir proxy.Direction, msg *jsonrpc
 
 // inspectRequest evaluates a client-to-server message.
 func (g *Gateway) inspectRequest(msg *jsonrpc.Message) (proxy.Interception, error) {
+	// With a policy loaded, a message chokepoint cannot read exactly as the
+	// server will is refused before any rule runs. Without one the proxy is
+	// transparent and promises to forward everything untouched.
+	if g.opts.Policy != nil {
+		if detail := msg.Ambiguity(); detail != "" {
+			return g.refuseUnreadable(msg, RuleAmbiguousRequest, detail)
+		}
+	}
+
 	switch msg.Method {
 	case methodToolsCall:
-		return g.inspectToolCall(msg)
+		var params toolCallParams
+		if len(msg.Params) > 0 {
+			if err := json.Unmarshal(msg.Params, &params); err != nil {
+				return g.refuseUnreadable(msg, RuleMalformedRequest, err.Error())
+			}
+		}
+		return g.inspectCall(msg, params.Name, params.Arguments, true)
 
-	case methodResourcesRead, methodPromptsGet:
-		// Secondary requests are recorded but not gated. They still count
+	case methodResourcesRead:
+		// A resource read names a URI, often file://, so it reaches the same
+		// places a file tool does and gets the same rules and workspace. It is
+		// matched in rules as tool == "resources/read".
+		var params map[string]any
+		if len(msg.Params) > 0 {
+			if err := json.Unmarshal(msg.Params, &params); err != nil {
+				return g.refuseUnreadable(msg, RuleMalformedRequest, err.Error())
+			}
+		}
+		return g.inspectCall(msg, msg.Method, params, false)
+
+	case methodPromptsGet:
+		// Recorded but not gated: prompt arguments are template values, not
+		// places. They still count
 		// toward the session's behaviour: an agent that enumerates resources
 		// instead of calling tools is doing the same sweep by another route,
 		// and excluding it would leave an obvious blind spot.
@@ -260,24 +288,10 @@ func (g *Gateway) inspectRequest(msg *jsonrpc.Message) (proxy.Interception, erro
 	}
 }
 
-func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, error) {
-	var params toolCallParams
-	if len(msg.Params) > 0 {
-		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			// Params that will not decode as JSON-RPC at all are the upstream
-			// server's business to reject. Forwarding keeps chokepoint from
-			// becoming a second, divergent parser of the envelope.
-			//
-			// Not in tension with the schema check further down, which is a
-			// different question: that one asks whether decodable arguments
-			// match what the tool itself advertised, and it exists precisely
-			// because servers are lax about enforcing their own declared
-			// schemas. This branch is reached only when there is nothing to
-			// check.
-			g.opts.Logger.Debug("tools/call params did not decode", "error", err)
-			return proxy.Interception{Decision: proxy.Forward}, nil
-		}
-	}
+// inspectCall evaluates one tool call or resource read against the policy.
+// name is what rules see as tool, and args are what targets come from.
+func (g *Gateway) inspectCall(msg *jsonrpc.Message, name string, args map[string]any, isToolCall bool) (proxy.Interception, error) {
+	params := toolCallParams{Name: name, Arguments: args}
 
 	targets := policy.ExtractTargets(params.Arguments)
 	locations := policy.ExtractLocations(params.Arguments)
@@ -294,7 +308,7 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 		Tool:         params.Name,
 		Target:       firstOf(targets),
 		PayloadBytes: len(msg.Params),
-		IsToolCall:   true,
+		IsToolCall:   isToolCall,
 		At:           now,
 		Unscoped:     !contains(locations, firstOf(targets)),
 	})
@@ -441,6 +455,57 @@ func (g *Gateway) recordDenial(rule string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.denials[rule]++
+}
+
+// Built-in rules, decided before the policy for requests chokepoint cannot
+// read unambiguously. They appear in the audit log, report and metrics like
+// any other rule.
+const (
+	// RuleAmbiguousRequest refuses a message with duplicate keys, exact or
+	// up to case, which chokepoint and the server would read differently.
+	RuleAmbiguousRequest = "ambiguous-request"
+	// RuleMalformedRequest refuses a call whose params do not decode, since
+	// forwarding what was never checked would be failing open.
+	RuleMalformedRequest = "malformed-request"
+)
+
+// refuseUnreadable denies a client message before any rule runs. It is
+// recorded like a rule's deny, and monitor mode forwards it the same way.
+func (g *Gateway) refuseUnreadable(msg *jsonrpc.Message, rule, detail string) (proxy.Interception, error) {
+	unenforced := g.opts.Monitor
+	if g.opts.Observer != nil {
+		g.opts.Observer.ToolCallDecided(DecisionEvent{
+			ID:               msg.IDKey(),
+			Tool:             msg.Method,
+			Method:           msg.Method,
+			Effect:           policy.EffectDeny,
+			Rule:             rule,
+			Unenforced:       unenforced,
+			ScoreUnavailable: true,
+			SessionCalls:     g.assess().Calls,
+		})
+	}
+
+	if unenforced {
+		g.recordViolation(rule)
+		g.opts.Logger.Warn("policy violation allowed (monitor mode)",
+			"method", msg.Method, "rule", rule, "detail", detail)
+		return proxy.Interception{Decision: proxy.Forward}, nil
+	}
+
+	g.recordDenial(rule)
+	g.opts.Logger.Warn("request refused", "method", msg.Method, "rule", rule, "detail", detail)
+	if !msg.IsRequest() {
+		// A notification or response gets no reply; dropping it is the only
+		// way not to forward it.
+		return proxy.Interception{Decision: proxy.Drop}, nil
+	}
+	reply, err := jsonrpc.ErrorResponse(msg.ID, jsonrpc.CodePolicyDenied,
+		"blocked by chokepoint: "+detail, map[string]any{"rule": rule})
+	if err != nil {
+		return proxy.Interception{}, err
+	}
+	return proxy.Interception{Decision: proxy.Reject, Message: reply}, nil
 }
 
 // recordViolation counts one denial that monitor mode did not enforce.

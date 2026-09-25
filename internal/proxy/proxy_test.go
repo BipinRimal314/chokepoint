@@ -497,3 +497,25 @@ func itoa(i int) string {
 	b, _ := json.Marshal(i)
 	return string(b)
 }
+
+// TestUnparseableClientMessageIsRefusedWhenEnforcing pins the fail-closed path:
+// the server never sees it, and the client gets a parse error.
+func TestUnparseableClientMessageIsRefusedWhenEnforcing(t *testing.T) {
+	bad := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fetch","arguments":{"n":NaN}}}` + "\n"
+	serverIn, clientOut := &syncBuffer{}, &syncBuffer{}
+	sess := NewSession(Streams{
+		ClientIn:  strings.NewReader(bad),
+		ClientOut: clientOut,
+		ServerIn:  serverIn,
+		ServerOut: strings.NewReader(""),
+	}, Options{RejectUnparseable: true, DrainGrace: 50 * time.Millisecond})
+	if err := sess.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if serverIn.String() != "" {
+		t.Errorf("server received %q", serverIn.String())
+	}
+	if !strings.Contains(clientOut.String(), "-32700") {
+		t.Errorf("client got %q, want a parse error", clientOut.String())
+	}
+}

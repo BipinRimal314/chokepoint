@@ -231,3 +231,29 @@ func TestWriterSerializesConcurrentWrites(t *testing.T) {
 		}
 	}
 }
+
+func TestAmbiguity(t *testing.T) {
+	cases := map[string]bool{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"r","arguments":{"path":"/a"}}}`:                           false,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"r","arguments":{"path":"/a"},"Arguments":{"path":"/b"}}}`: true,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","Method":"ping"}`:                                                           true,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"path":"/a","PATH":"/b"}}}`:                          true,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"path":"/a"},"arguments":{"path":"/b"}}}`:            true,
+		// U+017F folds to "s" and U+212A to "k" in encoding/json.
+		`{"jsonrpc":"2.0","id":1,"params":{"arguments":{},"argument` + "ſ" + `":{}}}`: true,
+		`{"jsonrpc":"2.0","id":1,"params":{"key":1,"` + "K" + `ey":2}}`:               true,
+		// The same key in sibling or nested objects is not a duplicate.
+		`{"jsonrpc":"2.0","id":1,"params":{"a":{"path":"/a"},"b":{"path":"/b"},"c":[{"path":1},{"path":2}]}}`: false,
+		// Values equal to keys are not keys.
+		`{"jsonrpc":"2.0","id":1,"params":{"path":"path","list":["path","path"]}}`: false,
+	}
+	for raw, want := range cases {
+		msg, err := Parse([]byte(raw))
+		if err != nil {
+			t.Fatalf("Parse(%s): %v", raw, err)
+		}
+		if got := msg.Ambiguity() != ""; got != want {
+			t.Errorf("Ambiguity(%s) = %q, want ambiguous=%v", raw, msg.Ambiguity(), want)
+		}
+	}
+}
