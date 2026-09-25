@@ -20,13 +20,13 @@ jobs:
       attestations: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # goreleaser builds the changelog from the log between tags, and a
           # shallow clone silently produces an empty one.
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           check-latest: true
@@ -38,7 +38,7 @@ jobs:
         run: go test -race ./...
 
       - name: Release
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
@@ -54,7 +54,7 @@ jobs:
       # (ASI-04, supply chain). Shipping a tool that denies tool calls without
       # it would be an odd position to argue from.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/*.tar.gz
