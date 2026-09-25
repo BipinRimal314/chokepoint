@@ -58,11 +58,17 @@ chokepoint report            # read what happened
 
 ## What it cannot do
 
-- **It only sees MCP.** An agent's built-in tools (Claude Code's own `Read`,
-  `Bash`, `WebFetch`) do not go through it, and neither does anything a shell
-  command does once it is running. For a real boundary, switch those off, or
-  run the agent in a sandbox whose network rules are the wall and use
+- **It only sees MCP.** An agent's built-in tools do not go through it, and
+  neither does anything a shell command does once it is running. With Claude
+  Code, `--tools ""` switches every built-in off. Disabling `Bash` alone is
+  not enough: in testing, Claude read a file through another built-in tool.
+  Or run the agent in a sandbox whose network rules are the wall, and use
   chokepoint as the record.
+- **Monitor mode records; it does not protect.** A hijacked agent in monitor
+  mode did everything it tried. The report is how you find out.
+- **A message chokepoint cannot parse leaves no record.** In enforce mode it
+  is refused. In monitor mode it is forwarded and appears only in the log
+  output, not in the audit log or the report.
 - **It checks where a call goes, not what it means.** Reading an allowed file
   and pasting its contents into an allowed web request is two allowed calls.
 - **Rules are only as good as the list.** The starter list of credential

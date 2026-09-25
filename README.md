@@ -31,13 +31,20 @@ chokepoint report            # what it did, and every breach
 refused and the agent gets an error explaining why. In `monitor` mode it is
 let through, so an agent running unattended is never stopped, and it is still
 recorded and listed by `chokepoint report` as a breach that was allowed.
-Change `mode:` in `chokepoint.yaml`.
+Monitor mode protects nothing: in testing, a hijacked agent in monitor mode
+sent `.env` to a web server and rewrote `~/.bashrc`, and the report listed
+both. Change `mode:` in `chokepoint.yaml`.
 
 **What it cannot see.** Only calls that go through MCP. An agent's own
-built-in tools (Claude Code's `Read`, `Bash`, `WebFetch`) do not pass through
-it, and neither does anything a shell command does once it is running. Pair
-chokepoint with those tools switched off, or with a sandbox whose network
-rules are the real wall.
+built-in tools do not pass through it, and neither does anything a shell
+command does once it is running. With Claude Code, run with `--tools ""` so
+MCP is the only way the agent can act: in testing, disabling `Bash` alone
+was not enough, because Claude reached a file through another built-in tool.
+Or pair chokepoint with a sandbox whose network rules are the real wall.
+
+**Tested end to end** with Claude Code and a scripted hijacked agent against
+the real filesystem and fetch servers: [docs/real-agent-test.md](docs/real-agent-test.md).
+The plain-language design is in [docs/how-it-works.md](docs/how-it-works.md).
 
 One server can also be run by hand, which is what `wrap` sets up:
 

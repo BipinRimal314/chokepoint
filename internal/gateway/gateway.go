@@ -422,9 +422,11 @@ func (g *Gateway) inspectCall(msg *jsonrpc.Message, name string, args map[string
 // has to change course, and "denied" with no reason produces either a retry
 // loop or a give-up — both worse than an explanation.
 func (g *Gateway) denialFor(msg *jsonrpc.Message, d policy.Decision, a detect.Assessment, outOfScope []string) ([]byte, error) {
-	message := d.Message
-	if message == "" {
-		message = "blocked by chokepoint policy"
+	// Always names chokepoint, so an agent, and a person reading its
+	// transcript, can tell a policy refusal from the server failing.
+	message := "blocked by chokepoint policy"
+	if d.Message != "" {
+		message = "blocked by chokepoint: " + d.Message
 	}
 
 	data := map[string]any{
