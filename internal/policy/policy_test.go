@@ -536,3 +536,29 @@ func TestModeDefaultsToEnforceAndRejectsUnknown(t *testing.T) {
 		t.Error("an unknown mode was accepted")
 	}
 }
+
+func TestAlwaysEnforce(t *testing.T) {
+	p, err := Parse([]byte(`
+rules:
+  - name: no-secrets
+    match: targets.exists(t, t.contains(".ssh"))
+    effect: deny
+    always_enforce: true
+  - name: outside
+    match: tool == "fetch"
+    effect: deny
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := p.Evaluate(Request{Tool: "read", Targets: []string{"/h/.ssh/k"}}); !d.AlwaysEnforce {
+		t.Error("always_enforce not carried on the decision")
+	}
+	if d := p.Evaluate(Request{Tool: "fetch"}); d.AlwaysEnforce {
+		t.Error("a rule without always_enforce reported it")
+	}
+	// On anything but a deny it would promise protection it cannot give.
+	if _, err := Parse([]byte("rules:\n  - name: w\n    match: 'true'\n    effect: audit\n    always_enforce: true\n")); err == nil {
+		t.Error("always_enforce on an audit rule was accepted")
+	}
+}

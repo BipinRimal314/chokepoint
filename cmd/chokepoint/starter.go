@@ -22,6 +22,8 @@ func starterPolicy(workspace, mode string) string {
 # enforce: refuse a call that breaks a rule.
 # monitor: let it through, so an unattended agent keeps working, and record
 #          it as a violation. Switch without editing: --mode monitor.
+#          Monitor mode blocks nothing, except rules marked
+#          always_enforce: true (see no-secrets below).
 mode: %s
 
 default_effect: allow
@@ -55,6 +57,8 @@ rules:
         t.matches("(^|/)(id_rsa|id_dsa|id_ecdsa|id_ed25519|\\.netrc|\\.git-credentials|\\.pgpass|\\.npmrc|\\.pypirc|credentials|credentials\\.json)$") ||
         t.matches("^(file://)?/etc/(shadow|gshadow|sudoers)"))
     effect: deny
+    # Uncomment to keep this blocking even in monitor mode.
+    # always_enforce: true
     message: Credentials and keys are off limits to the agent.
 
   # Cloud instance metadata hands out the machine's own cloud credentials.
@@ -64,6 +68,7 @@ rules:
         t.contains("169.254.169.254") || t.contains("metadata.google.internal") ||
         t.contains("100.100.100.200") || t.contains("fd00:ec2::254"))
     effect: deny
+    # always_enforce: true
     message: Cloud instance metadata is off limits to the agent.
 
   # The boundary declared in workspace above.

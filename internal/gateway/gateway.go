@@ -345,7 +345,7 @@ func (g *Gateway) inspectCall(msg *jsonrpc.Message, name string, args map[string
 		SchemaViolations: violations,
 	})
 
-	unenforced := decision.Effect == policy.EffectDeny && g.opts.Monitor
+	unenforced := decision.Effect == policy.EffectDeny && g.opts.Monitor && !decision.AlwaysEnforce
 
 	if g.opts.Observer != nil {
 		g.opts.Observer.ToolCallDecided(DecisionEvent{
@@ -474,7 +474,9 @@ const (
 // refuseUnreadable denies a client message before any rule runs. It is
 // recorded like a rule's deny, and monitor mode forwards it the same way.
 func (g *Gateway) refuseUnreadable(msg *jsonrpc.Message, rule, detail string) (proxy.Interception, error) {
-	unenforced := g.opts.Monitor
+	// An unreadable request cannot be shown not to break an always_enforce
+	// rule, so with any such rule it is refused even in monitor mode.
+	unenforced := g.opts.Monitor && !g.opts.Policy.HasAlwaysEnforce()
 	if g.opts.Observer != nil {
 		g.opts.Observer.ToolCallDecided(DecisionEvent{
 			ID:               msg.IDKey(),
@@ -508,6 +510,30 @@ func (g *Gateway) refuseUnreadable(msg *jsonrpc.Message, rule, detail string) (p
 		return proxy.Interception{}, err
 	}
 	return proxy.Interception{Decision: proxy.Reject, Message: reply}, nil
+}
+
+// RecordUnparseable records a client message the proxy could not parse. It
+// never reaches Intercept, so without this it left no trace in the audit log
+// or the report. refused says whether the proxy answered it with a parse
+// error (enforce mode) or forwarded it (monitor mode).
+func (g *Gateway) RecordUnparseable(refused bool, detail string) {
+	if g.opts.Observer != nil {
+		g.opts.Observer.ToolCallDecided(DecisionEvent{
+			Tool:             "(unparseable)",
+			Effect:           policy.EffectDeny,
+			Rule:             RuleMalformedRequest,
+			Unenforced:       !refused,
+			ScoreUnavailable: true,
+			SessionCalls:     g.assess().Calls,
+		})
+	}
+	if refused {
+		g.recordDenial(RuleMalformedRequest)
+		g.opts.Logger.Warn("request refused", "rule", RuleMalformedRequest, "detail", detail)
+		return
+	}
+	g.recordViolation(RuleMalformedRequest)
+	g.opts.Logger.Warn("policy violation allowed (monitor mode)", "rule", RuleMalformedRequest, "detail", detail)
 }
 
 // recordViolation counts one denial that monitor mode did not enforce.

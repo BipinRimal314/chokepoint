@@ -550,3 +550,23 @@ func TestServerExitEndsSessionEvenIfClientReadIsStuck(t *testing.T) {
 		t.Fatal("session outlived its server")
 	}
 }
+
+// TestUnparseableClientMessageIsReported pins the hook in both modes.
+func TestUnparseableClientMessageIsReported(t *testing.T) {
+	for _, reject := range []bool{true, false} {
+		var got []bool
+		sess := NewSession(Streams{
+			ClientIn:  strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"x","params":{"n":NaN}}` + "\n"),
+			ClientOut: &syncBuffer{},
+			ServerIn:  &syncBuffer{},
+			ServerOut: strings.NewReader(""),
+		}, Options{RejectUnparseable: reject, DrainGrace: 50 * time.Millisecond,
+			OnUnparseable: func(refused bool, _ error) { got = append(got, refused) }})
+		if err := sess.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0] != reject {
+			t.Errorf("reject=%v: hook saw %v", reject, got)
+		}
+	}
+}

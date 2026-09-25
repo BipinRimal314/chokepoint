@@ -332,7 +332,8 @@ func run(cfg config) error {
 		ServerOut: serverOut,
 	}, proxy.Options{
 		Interceptor:       gw,
-		RejectUnparseable: pol != nil && pol.Mode == policy.ModeEnforce,
+		RejectUnparseable: pol != nil && (pol.Mode == policy.ModeEnforce || pol.HasAlwaysEnforce()),
+		OnUnparseable:     unparseableRecorder(pol, gw),
 		OnError: func(dir proxy.Direction, err error) {
 			logger.Debug("proxy note", "direction", dir.String(), "error", err)
 		},
@@ -372,6 +373,15 @@ func run(cfg config) error {
 		return fmt.Errorf("upstream: %w", waitErr)
 	}
 	return nil
+}
+
+// unparseableRecorder records unparseable client messages when a policy is
+// loaded. Without one the proxy is transparent and records nothing.
+func unparseableRecorder(pol *policy.Policy, gw *gateway.Gateway) func(bool, error) {
+	if pol == nil {
+		return nil
+	}
+	return func(refused bool, err error) { gw.RecordUnparseable(refused, err.Error()) }
 }
 
 // upstreamExit is the MCP server's own non-zero exit code.

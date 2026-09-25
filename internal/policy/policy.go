@@ -47,6 +47,11 @@ type Rule struct {
 	// Message is returned to the agent on deny. A good one tells the agent
 	// what to do instead, because the agent is the one that has to recover.
 	Message string `yaml:"message"`
+	// AlwaysEnforce keeps a deny rule blocking in monitor mode. Monitor mode
+	// otherwise blocks nothing, which is what someone letting an agent run
+	// unchecked wants; this is for the few things they still never want to
+	// happen, such as reading credentials.
+	AlwaysEnforce bool `yaml:"always_enforce"`
 
 	program cel.Program
 }
@@ -160,6 +165,24 @@ type Request struct {
 	SchemaViolations []string
 }
 
+// HasAlwaysEnforce reports whether any rule keeps blocking in monitor mode.
+//
+// When one does, a request chokepoint cannot read has to be refused in
+// monitor mode too: it cannot be shown not to break that rule. Forwarding it
+// let an ambiguous request read an SSH key past an always_enforce rule that
+// blocked the same read written plainly.
+func (p *Policy) HasAlwaysEnforce() bool {
+	if p == nil {
+		return false
+	}
+	for _, r := range p.Rules {
+		if r.AlwaysEnforce {
+			return true
+		}
+	}
+	return false
+}
+
 // Mode says what a deny does.
 type Mode string
 
@@ -187,6 +210,9 @@ type Decision struct {
 	Message string
 	// Audited lists audit rules that matched along the way.
 	Audited []string
+	// AlwaysEnforce is the matched rule's always_enforce: the deny stands
+	// in monitor mode.
+	AlwaysEnforce bool
 }
 
 // declarations are the variables every rule may reference.
@@ -255,6 +281,11 @@ func (p *Policy) Compile() error {
 
 	for i := range p.Rules {
 		rule := &p.Rules[i]
+		if rule.AlwaysEnforce && rule.Effect != EffectDeny {
+			// Only a deny can be enforced; accepting it elsewhere would
+			// promise protection the rule does not give.
+			return fmt.Errorf("rule %q: always_enforce applies only to effect: deny", rule.Name)
+		}
 		if rule.Name == "" {
 			return fmt.Errorf("rule %d: name is required", i)
 		}
@@ -359,10 +390,11 @@ func (p *Policy) Evaluate(req Request) Decision {
 			continue
 		default:
 			return Decision{
-				Effect:  rule.Effect,
-				Rule:    rule.Name,
-				Message: rule.Message,
-				Audited: audited,
+				Effect:        rule.Effect,
+				Rule:          rule.Name,
+				Message:       rule.Message,
+				Audited:       audited,
+				AlwaysEnforce: rule.AlwaysEnforce,
 			}
 		}
 	}
