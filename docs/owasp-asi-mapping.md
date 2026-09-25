@@ -37,13 +37,13 @@ so the hijack itself is invisible here and always will be — this is a limit of
 position, not of implementation.
 
 What it does reach is the consequence. An agent working to someone else's goal
-has to act, and acting means tool calls. A [declared workspace](../README.md#declaring-a-workspace)
+has to act, and acting means tool calls. A [declared workspace](reference.md#declaring-a-workspace)
 is the strongest control available: an agent redirected at `/home/u/.ssh` is
 out of bounds on its first call regardless of what convinced it to go there.
 
 Do not read the decomposition score as an ASI01 control. It scores how varied
 behaviour is, and a hijacked agent has no obligation to vary — see the
-[single-tool sweep defect](../README.md#known-defect-a-single-tool-sweep-is-invisible).
+[single-tool sweep defect](reference.md#known-defect-a-single-tool-sweep-is-invisible).
 
 ## ASI02 — Tool Misuse
 
@@ -196,8 +196,8 @@ rendering happens in the client host, which chokepoint is not, so it cannot
 intervene at the point of approval.
 
 What it can do is remove the agent's monopoly on the account. The
-[session report](../README.md#the-session-report) and the
-[evidence log](../README.md#compliance-evidence) are assembled from observed
+[session report](reference.md#the-session-report) and the
+[evidence log](reference.md#compliance-evidence) are assembled from observed
 JSON-RPC traffic, not from anything the agent says about itself. A reviewer
 deciding whether to trust an explanation has an independent record of what
 actually happened — where the calls went, what was refused, when the session

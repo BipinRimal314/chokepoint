@@ -1,6 +1,6 @@
 # The single-tool sweep: a first pass, and a signal that did not work
 
-[Known defect](../README.md#known-defect-a-single-tool-sweep-is-invisible) says a
+[Known defect](reference.md#known-defect-a-single-tool-sweep-is-invisible) says a
 session calling one tool against any number of distinct targets scores exactly
 `0.400` and never crosses the `0.45` threshold, and that fixing it needs "a
 signal that survives a constant tool sequence". This is the record of a first

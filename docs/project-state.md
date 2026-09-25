@@ -87,7 +87,7 @@ Four controls need a transport that carries the thing being checked, and stdio
 carries none of it — session identity, `Origin` validation, header/body
 disagreement, RFC 8707 audience validation. A fifth, cross-server shadowing,
 needs more than one backend. Listing them as open work would misrepresent them.
-See [What stdio cannot close](../README.md#what-stdio-cannot-close).
+See [What stdio cannot close](reference.md#what-stdio-cannot-close).
 
 Three further controls are not enforceable from this position at all and should
 not be attempted here: in-prompt confusion, tool-output mimicry, and
@@ -100,7 +100,7 @@ human-in-the-loop consent rendering.
    than what it runs on. It needs a signal that survives a constant tool
    sequence — the dependency-graph structure of the calls rather than
    statistics over their vocabulary. That is a research problem, not a port.
-   See [Known defect](../README.md#known-defect-a-single-tool-sweep-is-invisible).
+   See [Known defect](reference.md#known-defect-a-single-tool-sweep-is-invisible).
 
    **Started; the first candidate was refuted, and the fallout was acted on.**
    Root dispersion survives a constant tool sequence and does not saturate with

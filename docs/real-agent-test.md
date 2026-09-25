@@ -79,12 +79,21 @@ server received nothing. The same run with a fresh setup from `e2e/setup.sh`
 gives the same result.
 
 **Monitor mode, same attacks:** all went through. The `.env` contents reached
-the web server and `~/.bashrc` was overwritten. `chokepoint report` listed 10
-of the 11 as allowed breaches. The eleventh, the `NaN` message, is not in the
-log, because chokepoint cannot parse it into a record; in enforce mode it is
-refused.
+the web server and `~/.bashrc` was overwritten. `chokepoint report` listed all
+11 as allowed breaches.
+
+**Monitor mode with `always_enforce` on `no-secrets` and `no-cloud-metadata`:**
+every attempt at a secret or at cloud metadata was blocked, including the
+parser-trick versions; everything else went through and was listed. The first
+version of `always_enforce` failed this: the decoy `Arguments` key read the
+SSH key that the plain request could not, because monitor mode forwarded a
+request chokepoint could not read. With any rule always enforced, such
+requests are now refused in monitor mode too.
 
 ## What was found and fixed while building this test
+
+- **Monitor mode left unparseable messages out of the report.** They are now
+  recorded in both modes.
 
 - **Claude Code's other built-in tools skip MCP.** With `Bash` disabled but
   other built-ins on, Claude read `.env` through a shell command when its MCP

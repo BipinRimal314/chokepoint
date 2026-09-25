@@ -37,7 +37,7 @@ know it is there. Every call passes through it, and for each one it:
    clear error saying which rule stopped it. It usually tells the user and
    carries on with the rest of the task. In `monitor` mode the call goes
    through, so nothing ever stops an unattended agent, and the breach is still
-   recorded.
+   recorded. A rule marked `always_enforce: true` blocks in both modes.
 5. **Writes it down.** One line per call in an audit log in
    `~/.local/state/chokepoint/`: the tool, what it touched, the decision, the
    rule, and whether a breach was actually blocked. The format is
@@ -65,10 +65,8 @@ chokepoint report            # read what happened
   Or run the agent in a sandbox whose network rules are the wall, and use
   chokepoint as the record.
 - **Monitor mode records; it does not protect.** A hijacked agent in monitor
-  mode did everything it tried. The report is how you find out.
-- **A message chokepoint cannot parse leaves no record.** In enforce mode it
-  is refused. In monitor mode it is forwarded and appears only in the log
-  output, not in the audit log or the report.
+  mode did everything it tried. The report is how you find out. Mark a rule
+  `always_enforce: true` to keep it blocking in monitor mode.
 - **It checks where a call goes, not what it means.** Reading an allowed file
   and pasting its contents into an allowed web request is two allowed calls.
 - **Rules are only as good as the list.** The starter list of credential
