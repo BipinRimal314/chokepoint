@@ -57,6 +57,7 @@ const (
 	KeyEffect         = "chokepoint.policy.effect"
 	KeyRule           = "chokepoint.policy.rule"
 	KeyEnforced       = "chokepoint.policy.enforced"
+	KeyAudited        = "chokepoint.policy.audited"
 	KeyTargets        = "chokepoint.targets"
 	KeyScore          = "chokepoint.decomposition.score"
 	KeySessionCalls   = "chokepoint.session.calls"
@@ -105,6 +106,11 @@ func Attributes(ev gateway.DecisionEvent) []Attr {
 	}
 	if ev.Rule != "" {
 		attrs = append(attrs, Attr{KeyRule, ev.Rule})
+	}
+	if len(ev.Audited) > 0 {
+		// Audit rules exist to leave a record; without this they left none
+		// in the evidence log.
+		attrs = append(attrs, Attr{KeyAudited, ev.Audited})
 	}
 	if len(ev.Targets) > 0 {
 		attrs = append(attrs, Attr{KeyTargets, ev.Targets})

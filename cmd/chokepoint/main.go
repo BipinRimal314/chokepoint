@@ -54,6 +54,16 @@ type config struct {
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		if cmd, ok := subcommands[os.Args[1]]; ok {
+			if err := cmd(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "chokepoint %s: %v\n", os.Args[1], err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	cfg, err := parseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "chokepoint: %v\n\n", err)
@@ -72,7 +82,15 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: chokepoint [options] -- <mcp-server-command> [args...]
+	fmt.Fprint(os.Stderr, `usage:
+  chokepoint init [--monitor]          write chokepoint.yaml for this folder
+  chokepoint wrap [CONFIG]             route an MCP config's servers through chokepoint
+                                       (default .mcp.json; also Claude Desktop, Cursor)
+  chokepoint unwrap [CONFIG]           undo wrap
+  chokepoint report [--since 24h] [--all] [LOGS...]
+                                       what the agent did, and every breach
+  chokepoint [options] -- <mcp-server-command> [args...]
+                                       run one server behind a policy (what wrap sets up)
 
 options:
   --policy PATH     policy file (YAML); omit for a transparent proxy

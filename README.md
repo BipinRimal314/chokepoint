@@ -4,14 +4,45 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/BipinRimal314/chokepoint.svg)](https://pkg.go.dev/github.com/BipinRimal314/chokepoint)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-A policy-enforcing proxy for Model Context Protocol tool servers.
+**A security checkpoint and audit log for what your AI agent does with its tools.**
 
-It runs an MCP server as a child process and sits between it and the agent,
-evaluating every tool call before forwarding it — and scoring the *sequence* of
-calls for behaviour no single call reveals.
+AI agents such as Claude Code and Cursor reach files, databases and the web
+through MCP tool servers. chokepoint sits in that connection. Every tool call
+is checked against rules you set (stay in this folder, never touch
+credentials, no internet except these sites) and then either blocked or let
+through. Every decision is written to a log you can read afterwards, so you
+know what the agent did without watching it.
+
+## Quickstart
 
 ```bash
-chokepoint --policy policy.yaml -- npx -y @modelcontextprotocol/server-filesystem /srv
+cd your-project
+chokepoint init              # writes chokepoint.yaml: this folder only, no secrets, no internet
+chokepoint wrap .mcp.json    # routes your MCP servers through chokepoint (backup kept)
+# ...use your agent as usual...
+chokepoint report            # what it did, and every breach
+```
+
+`wrap` works on any config with an `mcpServers` block: Claude Code's
+`.mcp.json`, Claude Desktop's `claude_desktop_config.json`, Cursor's
+`.cursor/mcp.json`. `chokepoint unwrap` undoes it.
+
+**Blocking or just watching.** In `enforce` mode (the default) a breach is
+refused and the agent gets an error explaining why. In `monitor` mode it is
+let through, so an agent running unattended is never stopped, and it is still
+recorded and listed by `chokepoint report` as a breach that was allowed.
+Change `mode:` in `chokepoint.yaml`.
+
+**What it cannot see.** Only calls that go through MCP. An agent's own
+built-in tools (Claude Code's `Read`, `Bash`, `WebFetch`) do not pass through
+it, and neither does anything a shell command does once it is running. Pair
+chokepoint with those tools switched off, or with a sandbox whose network
+rules are the real wall.
+
+One server can also be run by hand, which is what `wrap` sets up:
+
+```bash
+chokepoint --policy chokepoint.yaml -- npx -y @modelcontextprotocol/server-filesystem /srv
 ```
 
 ## Install

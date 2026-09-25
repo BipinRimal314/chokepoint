@@ -291,3 +291,48 @@ func TestEveryDenySaysWhetherItWasEnforced(t *testing.T) {
 		t.Errorf("status.message = %q, want it to say the violation was allowed", msg)
 	}
 }
+
+// TestReadRoundTrip pins that what the writer records, the reader returns:
+// the report is only as trustworthy as this round trip.
+func TestReadRoundTrip(t *testing.T) {
+	var b bytes.Buffer
+	w := New(&b, Options{})
+
+	blocked := decision()
+	w.ToolCallDecided(blocked)
+
+	allowed := decision()
+	allowed.Effect = policy.EffectDeny
+	allowed.Unenforced = true
+	w.ToolCallDecided(allowed)
+
+	watched := decision()
+	watched.Effect = policy.EffectAllow
+	watched.Rule = ""
+	watched.Audited = []string{"watch-writes"}
+	w.ToolCallDecided(watched)
+
+	b.WriteString("{torn line\n")
+
+	var bad []int
+	got, err := Read(&b, func(line int, _ error) { bad = append(bad, line) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || len(bad) != 1 || bad[0] != 4 {
+		t.Fatalf("read %d entries, bad lines %v; want 3 and [4]", len(got), bad)
+	}
+	if e := got[0]; !e.Breach() || !e.Enforced || e.Rule != "outside-declared-workspace" ||
+		e.Tool != "read_file" || len(e.Targets) != 2 || e.OutOfScope != 1 || e.Session != w.TraceID() {
+		t.Errorf("blocked entry = %+v", e)
+	}
+	if e := got[1]; !e.Breach() || e.Enforced {
+		t.Errorf("monitor-mode entry = %+v, want a breach that was not enforced", e)
+	}
+	if e := got[2]; e.Breach() || len(e.Audited) != 1 || e.Audited[0] != "watch-writes" {
+		t.Errorf("audited entry = %+v", e)
+	}
+	if got[0].At.IsZero() {
+		t.Error("timestamp not read")
+	}
+}
