@@ -57,6 +57,20 @@ func netListen(addr string) (net.Listener, error) {
 	return net.Listen("tcp", addr)
 }
 
+// isLoopback reports whether a host:port address names this machine only. An
+// empty host, as in ":9090", binds every interface and is not loopback.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // otelAttrs converts the canonical attribute set into OTel key-values.
 //
 // The definition lives in the audit package because both the trace exporter and

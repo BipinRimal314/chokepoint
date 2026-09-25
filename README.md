@@ -584,7 +584,7 @@ Both subsystems are off by default and independently switchable.
 
 ```bash
 chokepoint --policy policy.yaml \
-  --metrics-addr :9090 \
+  --metrics-addr 127.0.0.1:9090 \
   --otlp-endpoint localhost:4317 \
   -- npx -y @modelcontextprotocol/server-filesystem /srv
 ```

@@ -46,6 +46,7 @@ type config struct {
 	logLevel     string
 	metricsAddr  string
 	otlpEndpoint string
+	otlpInsecure bool
 	auditLog     string
 	report       bool
 	showVersion  bool
@@ -82,6 +83,8 @@ options:
   --max-calls N     per-session call retention cap (default 10000)
   --metrics-addr A  serve Prometheus metrics on A, e.g. :9090 (default off)
   --otlp-endpoint E export OTLP/gRPC traces to E, e.g. localhost:4317 (default off)
+                    TLS unless E is on this machine
+  --otlp-insecure   send traces to a remote E without TLS (spans include paths)
   --log-level LEVEL debug, info, warn, error (default info)
   --audit-log PATH  append tool-call decisions to PATH as OTLP/JSON lines
   --report          print a session report to stderr on exit (default off)
@@ -129,6 +132,8 @@ func parseArgs(args []string) (config, error) {
 			cfg.metricsAddr, err = next()
 		case "--otlp-endpoint":
 			cfg.otlpEndpoint, err = next()
+		case "--otlp-insecure":
+			cfg.otlpInsecure = true
 		case "--audit-log":
 			cfg.auditLog, err = next()
 		case "--report":
@@ -240,6 +245,7 @@ func run(cfg config) error {
 			Version:      version,
 			MetricsAddr:  cfg.metricsAddr,
 			OTLPEndpoint: cfg.otlpEndpoint,
+			OTLPInsecure: cfg.otlpInsecure,
 			Logger:       logger,
 		})
 		if err != nil {

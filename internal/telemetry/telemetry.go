@@ -36,6 +36,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/grpc/credentials"
 
 	"github.com/BipinRimal314/chokepoint/internal/audit"
 	"github.com/BipinRimal314/chokepoint/internal/gateway"
@@ -62,6 +63,10 @@ type Options struct {
 	// OTLPEndpoint is an OTLP/gRPC collector address, e.g. "localhost:4317".
 	// Empty disables tracing.
 	OTLPEndpoint string
+	// OTLPInsecure sends traces to a non-loopback collector without TLS. Off
+	// by default because spans carry targets: file paths, hostnames, query
+	// strings.
+	OTLPInsecure bool
 	Logger       *slog.Logger
 }
 
@@ -243,6 +248,13 @@ func (t *Telemetry) startMetricsServer(addr string) error {
 		}
 	}()
 	t.logger.Info("metrics endpoint listening", "addr", t.boundAddr)
+	if !isLoopback(t.boundAddr) {
+		// Metrics hold no targets, but tool and rule names still describe what
+		// the agent is doing. Inside a pod that is the point; on a laptop it
+		// is usually an accident.
+		t.logger.Warn("metrics endpoint is reachable from other hosts; use 127.0.0.1:PORT to keep it local",
+			"addr", t.boundAddr)
+	}
 	return nil
 }
 
@@ -252,14 +264,23 @@ func (t *Telemetry) startMetricsServer(addr string) error {
 func (t *Telemetry) listenerAddr() string { return t.boundAddr }
 
 func (t *Telemetry) startTracing(ctx context.Context, opts Options) error {
+	// Spans carry targets, which are as sensitive as the data the agent works
+	// on, so they leave the machine encrypted unless told otherwise. Loopback
+	// stays plaintext: a local collector is the common case, and TLS to it
+	// protects nothing. Anything else uses TLS against the system roots,
+	// which is what a hosted collector presents.
+	transport := otlptracegrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, ""))
+	switch {
+	case isLoopback(opts.OTLPEndpoint):
+		transport = otlptracegrpc.WithInsecure()
+	case opts.OTLPInsecure:
+		t.logger.Warn("sending traces without TLS to a non-local collector; spans include file paths and queries",
+			"endpoint", opts.OTLPEndpoint)
+		transport = otlptracegrpc.WithInsecure()
+	}
 	exporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithEndpoint(opts.OTLPEndpoint),
-		// Plaintext by default: the expected deployment is a collector
-		// sidecar or a DaemonSet peer on the same node, not the public
-		// internet. TLS would need certificate configuration this flag set
-		// does not expose, and a half-configured TLS story is worse than an
-		// explicit plaintext one.
-		otlptracegrpc.WithInsecure(),
+		transport,
 	)
 	if err != nil {
 		return fmt.Errorf("otlp exporter: %w", err)

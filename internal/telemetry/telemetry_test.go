@@ -363,3 +363,21 @@ func TestConcurrentObservationIsRaceFree(t *testing.T) {
 
 // Compile-time proof that Telemetry satisfies the gateway's Observer.
 var _ gateway.Observer = (*Telemetry)(nil)
+
+// TestIsLoopback pins which endpoints may skip TLS. ":9090" binds every
+// interface, so it must not count as local.
+func TestIsLoopback(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"localhost:4317":     true,
+		"127.0.0.1:4317":     true,
+		"[::1]:4317":         true,
+		":9090":              false,
+		"0.0.0.0:9090":       false,
+		"collector.corp:443": false,
+		"10.0.0.5:4317":      false,
+	} {
+		if got := isLoopback(addr); got != want {
+			t.Errorf("isLoopback(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}
