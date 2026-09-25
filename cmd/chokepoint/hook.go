@@ -305,7 +305,13 @@ func resolvePath(p, cwd string) string {
 			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
 		}
 	}
-	if !filepath.IsAbs(p) && cwd != "" {
+	switch {
+	case filepath.IsAbs(p):
+	case strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`):
+		// Rooted but not absolute: on Windows, "/etc/hosts" is the root of
+		// the working folder's drive, not a path inside the working folder.
+		p = filepath.VolumeName(cwd) + p
+	case cwd != "":
 		p = filepath.Join(cwd, p)
 	}
 	return filepath.Clean(p)
@@ -345,11 +351,16 @@ func shellPaths(cmd string) []string {
 		// A word with a dot may be a file name: `sed -i ... chokepoint.yaml`
 		// has no slash. Resolved against the working folder, words that are
 		// not files (a version, a domain) land inside it and change nothing.
-		if strings.ContainsAny(word, "/.") || strings.HasPrefix(word, "~") {
+		if strings.ContainsAny(word, `/.\`) || strings.HasPrefix(word, "~") || hasDrive(word) {
 			out = append(out, word)
 		}
 	}
 	return out
+}
+
+// hasDrive reports a Windows drive prefix such as C:.
+func hasDrive(p string) bool {
+	return len(p) >= 2 && p[1] == ':' && ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z'))
 }
 
 // isShellDevice reports the standard device files shell commands redirect to.
