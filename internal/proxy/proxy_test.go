@@ -519,3 +519,34 @@ func TestUnparseableClientMessageIsRefusedWhenEnforcing(t *testing.T) {
 		t.Errorf("client got %q, want a parse error", clientOut.String())
 	}
 }
+
+// stuckReader blocks forever and ignores Close, like a read already blocked
+// on os.Stdin, which closing the file does not interrupt.
+type stuckReader struct{ never chan struct{} }
+
+func (r stuckReader) Read([]byte) (int, error) { <-r.never; return 0, io.EOF }
+func (r stuckReader) Close() error             { return nil }
+
+// TestServerExitEndsSessionEvenIfClientReadIsStuck pins that a dead server
+// ends the session. Before, Run waited for the client pump, which sat in a
+// read of stdin that nothing could interrupt, so the agent was left talking
+// to a server that no longer existed.
+func TestServerExitEndsSessionEvenIfClientReadIsStuck(t *testing.T) {
+	sess := NewSession(Streams{
+		ClientIn:  stuckReader{never: make(chan struct{})},
+		ClientOut: &syncBuffer{},
+		ServerIn:  &syncBuffer{},
+		ServerOut: strings.NewReader(""), // the server has exited
+	}, Options{})
+
+	done := make(chan error, 1)
+	go func() { done <- sess.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("session outlived its server")
+	}
+}

@@ -182,7 +182,6 @@ func (s *Session) Run(ctx context.Context) error {
 		stop()
 	}()
 
-	var wg sync.WaitGroup
 	errs := make(chan error, 2)
 
 	// The two directions are deliberately NOT symmetric.
@@ -202,10 +201,11 @@ func (s *Session) Run(ctx context.Context) error {
 	// The server closing its end is different: nothing further can arrive, and
 	// an agent left waiting on a reply would hang forever. That side ends the
 	// session.
-	wg.Add(2)
+	clientDone := make(chan struct{})
+	serverDone := make(chan struct{})
 
 	go func() {
-		defer wg.Done()
+		defer close(clientDone)
 		err := s.pump(ctx, ClientToServer, s.streams.ClientIn, s.serverW)
 		errs <- err
 		if err == nil {
@@ -227,21 +227,38 @@ func (s *Session) Run(ctx context.Context) error {
 	}()
 
 	go func() {
-		defer wg.Done()
+		defer close(serverDone)
 		defer cancel()
 		errs <- s.pump(ctx, ServerToClient, s.streams.ServerOut, s.clientW)
 	}()
 
-	wg.Wait()
-	close(errs)
+	// The session is over when the server's output ends. The client pump is
+	// given a moment to finish what it is doing, but not waited on beyond
+	// that: a read already blocked on os.Stdin is not interrupted by closing
+	// it, and waiting there left the agent attached to a server that had
+	// exited, with every call hanging.
+	<-serverDone
+	select {
+	case <-clientDone:
+	case <-time.After(clientReleaseGrace):
+	}
 
-	for err := range errs {
-		if err != nil {
-			return err
+	for {
+		select {
+		case err := <-errs:
+			if err != nil {
+				return err
+			}
+		default:
+			return nil
 		}
 	}
-	return nil
 }
+
+// clientReleaseGrace bounds how long a finished session waits for the client
+// pump to notice. Short, because by then nothing it could read has anywhere
+// to go.
+const clientReleaseGrace = 500 * time.Millisecond
 
 // pump moves messages in one direction until the source is exhausted.
 func (s *Session) pump(ctx context.Context, dir Direction, src io.Reader, dst *jsonrpc.Writer) error {

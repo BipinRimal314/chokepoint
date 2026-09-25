@@ -77,6 +77,10 @@ func main() {
 
 	if err := run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "chokepoint: %v\n", err)
+		var code upstreamExit
+		if errors.As(err, &code) {
+			os.Exit(int(code))
+		}
 		os.Exit(1)
 	}
 }
@@ -358,13 +362,22 @@ func run(cfg config) error {
 	if waitErr != nil && ctx.Err() == nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
-			logger.Info("upstream exited", "code", exitErr.ExitCode())
+			if code := exitErr.ExitCode(); code > 0 {
+				// Passed on, so whatever supervises chokepoint sees that the
+				// server failed rather than a clean exit.
+				return upstreamExit(code)
+			}
 			return nil
 		}
 		return fmt.Errorf("upstream: %w", waitErr)
 	}
 	return nil
 }
+
+// upstreamExit is the MCP server's own non-zero exit code.
+type upstreamExit int
+
+func (e upstreamExit) Error() string { return fmt.Sprintf("upstream exited with code %d", int(e)) }
 
 func newLogger(level string) *slog.Logger {
 	var lvl slog.Level
