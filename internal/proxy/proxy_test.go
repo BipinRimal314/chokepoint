@@ -262,7 +262,12 @@ func TestInFlightRepliesSurviveClientClose(t *testing.T) {
 		ClientOut: &syncBuffer{},
 		ServerIn:  serverIn,
 		ServerOut: serverOut,
-	}, Options{})
+	}, Options{
+		// This server answers only once its stdin closes, so the wait for
+		// replies before closing it runs to the end of its grace. Short here so
+		// the test measures the contract, not the default timeout.
+		DrainGrace: 200 * time.Millisecond,
+	})
 
 	clientOut := &syncBuffer{}
 	sess.streams.ClientOut = clientOut
@@ -280,6 +285,66 @@ func TestInFlightRepliesSurviveClientClose(t *testing.T) {
 				`{"jsonrpc":"2.0","id":` + itoa(i) + `,"result":{}}` + "\n"))
 		}
 		_ = serverWriter.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("session did not finish")
+	}
+
+	if got := len(clientOut.lines()); got != n {
+		t.Errorf("client received %d replies, want %d", got, n)
+	}
+}
+
+// TestServerThatExitsOnEOFStillAnswers pins the other half of client close. A
+// common server shape (the Python SDK's, seen with mcp-server-fetch) treats
+// stdin EOF as shutdown and abandons replies it has not written yet. Closing
+// its stdin as soon as the client finished sending lost the tools/list reply
+// on about half of runs. The proxy now keeps stdin open until every request
+// it forwarded has been answered.
+func TestServerThatExitsOnEOFStillAnswers(t *testing.T) {
+	const n = 5
+
+	var requests strings.Builder
+	for i := 0; i < n; i++ {
+		requests.WriteString(`{"jsonrpc":"2.0","id":` + itoa(i) + `,"method":"tools/list"}` + "\n")
+	}
+	// A notification is not answered and must not be waited for.
+	requests.WriteString(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n")
+
+	serverOut, serverWriter := io.Pipe()
+	serverIn := &closableBuffer{closed: make(chan struct{})}
+	clientOut := &syncBuffer{}
+
+	sess := NewSession(Streams{
+		ClientIn:  strings.NewReader(requests.String()),
+		ClientOut: clientOut,
+		ServerIn:  serverIn,
+		ServerOut: serverOut,
+	}, Options{})
+
+	done := make(chan error, 1)
+	go func() { done <- sess.Run(context.Background()) }()
+
+	// Replies take a moment. If stdin closes first, the server exits and
+	// abandons whatever it had not written.
+	go func() {
+		defer serverWriter.Close()
+		for i := 0; i < n; i++ {
+			select {
+			case <-serverIn.closed:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			_, _ = serverWriter.Write([]byte(
+				`{"jsonrpc":"2.0","id":` + itoa(i) + `,"result":{}}` + "\n"))
+		}
+		<-serverIn.closed
 	}()
 
 	select {

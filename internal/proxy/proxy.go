@@ -128,15 +128,24 @@ type Session struct {
 
 	clientW *jsonrpc.Writer
 	serverW *jsonrpc.Writer
+
+	// pending holds the IDs of requests forwarded upstream and not yet
+	// answered, so a client close can wait for them before closing the
+	// server's stdin. answered is signalled whenever one is removed.
+	mu       sync.Mutex
+	pending  map[string]struct{}
+	answered chan struct{}
 }
 
 // NewSession returns a Session ready to Run.
 func NewSession(streams Streams, opts Options) *Session {
 	return &Session{
-		streams: streams,
-		opts:    opts,
-		clientW: jsonrpc.NewWriter(streams.ClientOut),
-		serverW: jsonrpc.NewWriter(streams.ServerIn),
+		streams:  streams,
+		opts:     opts,
+		clientW:  jsonrpc.NewWriter(streams.ClientOut),
+		serverW:  jsonrpc.NewWriter(streams.ServerIn),
+		pending:  make(map[string]struct{}),
+		answered: make(chan struct{}, 1),
 	}
 }
 
@@ -176,8 +185,14 @@ func (s *Session) Run(ctx context.Context) error {
 	// The client closing its end means "no more requests", not "discard the
 	// answers to the ones already sent". Tearing down here would drop every
 	// reply still in flight — with a client that writes a batch of requests
-	// and closes, that is nearly all of them. So this side signals
-	// end-of-input to the upstream by closing its stdin and then waits.
+	// and closes, that is nearly all of them. So this side waits for the
+	// upstream to answer what it was sent, then signals end-of-input by
+	// closing its stdin, then waits again for it to finish.
+	//
+	// Both waits matter. Many servers treat stdin EOF as shutdown and abandon
+	// replies they have not written yet, so closing stdin before they answer
+	// loses those replies. Others answer only once stdin closes, so the first
+	// wait is bounded and the second still follows it.
 	//
 	// The server closing its end is different: nothing further can arrive, and
 	// an agent left waiting on a reply would hang forever. That side ends the
@@ -186,7 +201,11 @@ func (s *Session) Run(ctx context.Context) error {
 
 	go func() {
 		defer wg.Done()
-		errs <- s.pump(ctx, ClientToServer, s.streams.ClientIn, s.serverW)
+		err := s.pump(ctx, ClientToServer, s.streams.ClientIn, s.serverW)
+		errs <- err
+		if err == nil {
+			s.awaitReplies(ctx, s.drainGrace())
+		}
 
 		if c, ok := s.streams.ServerIn.(io.Closer); ok {
 			_ = c.Close()
@@ -261,7 +280,12 @@ func (s *Session) handle(ctx context.Context, dir Direction, raw []byte, dst *js
 		return dst.WriteRaw(raw)
 	}
 
+	if dir == ServerToClient && msg.IsResponse() {
+		s.settle(msg.IDKey())
+	}
+
 	if s.opts.Interceptor == nil {
+		s.track(dir, msg)
 		return dst.WriteRaw(raw)
 	}
 
@@ -272,12 +296,14 @@ func (s *Session) handle(ctx context.Context, dir Direction, raw []byte, dst *js
 
 	switch verdict.Decision {
 	case Forward:
+		s.track(dir, msg)
 		return dst.WriteRaw(raw)
 
 	case Replace:
 		if verdict.Message == nil {
 			return fmt.Errorf("%s: interceptor returned Replace with no message", dir)
 		}
+		s.track(dir, msg)
 		return dst.WriteRaw(verdict.Message)
 
 	case Reject:
@@ -298,6 +324,54 @@ func (s *Session) handle(ctx context.Context, dir Direction, raw []byte, dst *js
 
 	default:
 		return fmt.Errorf("%s: unknown decision %d", dir, verdict.Decision)
+	}
+}
+
+// track records a client request about to be forwarded upstream, so that a
+// client close can wait for its reply. A rejected request is answered by the
+// proxy itself and is never tracked.
+func (s *Session) track(dir Direction, msg *jsonrpc.Message) {
+	if dir != ClientToServer || !msg.IsRequest() {
+		return
+	}
+	s.mu.Lock()
+	s.pending[msg.IDKey()] = struct{}{}
+	s.mu.Unlock()
+}
+
+// settle marks a request answered.
+func (s *Session) settle(id string) {
+	s.mu.Lock()
+	_, ok := s.pending[id]
+	delete(s.pending, id)
+	s.mu.Unlock()
+	if ok {
+		select {
+		case s.answered <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// awaitReplies blocks until every forwarded request has been answered, the
+// grace period passes, or the session ends.
+func (s *Session) awaitReplies(ctx context.Context, grace time.Duration) {
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	for {
+		s.mu.Lock()
+		n := len(s.pending)
+		s.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		select {
+		case <-s.answered:
+		case <-deadline.C:
+			return
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 

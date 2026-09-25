@@ -749,10 +749,15 @@ Fields are decoded lazily; anything forwarded unmodified is forwarded verbatim.
 
 **The two directions are not symmetric.** A client closing its end means "no
 more requests", not "discard the answers to the ones already sent" — so that
-side signals end-of-input upstream and waits, bounded by a drain timeout. A
-server closing its end ends the session, because nothing more can arrive and a
-waiting agent would hang forever. Getting this wrong dropped 40 of 41 replies,
-and only an end-to-end run against a real subprocess caught it.
+side waits for the upstream to answer every request it was sent, then signals
+end-of-input, then waits again, each wait bounded by a drain timeout. The
+first wait is there because many servers treat end-of-input as shutdown and
+abandon replies not yet written: `mcp-server-fetch` connected directly loses
+its `tools/list` reply on about half of runs when the client closes straight
+after sending. A server closing its end ends the session, because nothing more
+can arrive and a waiting agent would hang forever. Getting this wrong dropped
+40 of 41 replies, and only an end-to-end run against a real subprocess caught
+it.
 
 ## Development
 
