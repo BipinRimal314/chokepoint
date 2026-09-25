@@ -19,16 +19,37 @@ have to watch it.
 ```bash
 cd your-project
 chokepoint init              # writes chokepoint.yaml: this folder only, no secrets, no internet
-chokepoint wrap .mcp.json    # routes your MCP servers through chokepoint (backup kept)
+
+chokepoint wrap .mcp.json    # check MCP tool calls, for any MCP client
+chokepoint hook install      # check every Claude Code tool call, its built-in tools included
+
 # ...use your agent as usual...
 chokepoint report            # what it did, and every breach
 ```
 
+Use either, or both. They share `chokepoint.yaml`, the audit log and the
+report; with both, MCP calls are checked by the proxy and everything else by
+the hook, so nothing is checked or recorded twice. `unwrap` and
+`hook uninstall` undo them. Audit logs go to `~/.local/state/chokepoint/`
+(`%LocalAppData%` on Windows), outside the project so they can't be committed
+by accident.
+
+## Two places to check a call
+
+| | `wrap`: a proxy in front of each MCP server | `hook install`: a Claude Code hook |
+|---|---|---|
+| Works with | any MCP client: Claude Code, Claude Desktop, Cursor, your own agent | Claude Code |
+| Sees | MCP tool calls, and the server's replies before the agent does | every tool call, including built-in `Read`, `Bash`, `WebFetch`, `Edit` |
+| Relative paths like `.` | refused under a workspace; the proxy doesn't know the agent's folder | resolved against the agent's working folder |
+| Shell commands | not seen | paths and URLs in the command are checked (best effort) |
+| Can run out of the agent's reach | yes, e.g. as a separate process on a server | no; it lives in the agent's settings |
+
 `wrap` works on any config with an `mcpServers` block: Claude Code's
 `.mcp.json`, Claude Desktop's `claude_desktop_config.json`, Cursor's
-`.cursor/mcp.json`. `chokepoint unwrap` undoes it. Audit logs go to
-`~/.local/state/chokepoint/` (`%LocalAppData%` on Windows), outside the
-project so they can't be committed by accident.
+`.cursor/mcp.json`. `hook install` writes to `.claude/settings.local.json`,
+keeping any hooks you already have. If the hook itself fails, it refuses the
+call: Claude Code lets a call through when a hook errors, so a crash must not
+look like permission.
 
 Real output, from the hijacked-agent test below:
 
@@ -74,8 +95,9 @@ For the few things you never want to happen even then, mark the rule:
     always_enforce: true   # still blocks in monitor mode
 ```
 
-`chokepoint init` writes that line, commented out, on the credentials and
-cloud-metadata rules. When any rule is marked `always_enforce`, a request
+`chokepoint init` sets it on `protect-agent-config`, and writes it commented
+out on the credentials and cloud-metadata rules. To let an agent run with
+nothing blocked at all, delete it from `protect-agent-config` too. When any rule is marked `always_enforce`, a request
 chokepoint can't read unambiguously is refused in monitor mode too, because
 it can't be shown not to break that rule.
 
@@ -85,9 +107,11 @@ The rules `chokepoint init` writes, in order:
 
 | Rule | Blocks |
 |---|---|
+| `protect-agent-config` | the agent changing its own rules, MCP config, Claude Code or Cursor settings, or the audit logs, or deleting a folder that holds them. Blocks in monitor mode too, because an agent that can do this can erase the record monitor mode exists to keep |
 | `tool-definition-changed` | a server that changes a tool's definition after the session started, the signature of tool poisoning |
 | `no-secrets` | SSH, AWS, GCP, Azure, Kubernetes and Docker credentials, `.env` files, private keys, `.netrc`, `/etc/shadow`, wherever they are |
 | `no-cloud-metadata` | cloud instance metadata endpoints, which hand out the machine's own credentials |
+| `no-shell-network` | `curl`, `wget`, `nc`, `ssh`, `scp`, `rsync` and similar in a shell command (hook only), because `curl example.com` has no URL in it to check. Package managers are not covered |
 | `outside-workspace` | any file outside the project folder, and any website not listed under `workspace:` |
 | `watch-changes` | nothing; records every write, edit, move and delete |
 
@@ -110,7 +134,8 @@ scripts in [`e2e/`](e2e): the reference filesystem and fetch servers, a real
 open-source project, canary credentials, and files with planted prompt
 injections.
 
-- **Claude Code, 14 sessions:** ordinary work was never blocked. Every
+- **Claude Code through the hook, built-in tools on, 8 sessions:** ordinary work was never blocked; reading `.env` or credentials, reaching PyPI by `curl` and then by WebFetch, and every attempt to change chokepoint's own rules or config were blocked.
+- **Claude Code through the proxy, 14 sessions:** ordinary work was never blocked. Every
   attempt to read credentials, read `.env` or reach a site not on the list
   was blocked. Claude refused the planted injections by itself, so those
   never reached chokepoint.
@@ -120,15 +145,19 @@ injections.
 
 ## What it can't see
 
-- **Only calls that go through MCP.** An agent's own built-in tools skip it.
-  Run Claude Code with `--tools ""` so MCP is the only way it can act; in
-  testing, disabling `Bash` alone wasn't enough. Or pair chokepoint with a
-  sandbox whose network rules are the real wall.
+- **The proxy sees only MCP.** An agent's own built-in tools skip it. With
+  Claude Code, add the hook, which sees them. Other agents: run them with
+  their built-in tools off, or inside a sandbox whose network rules are the
+  real wall.
+- **Shell commands are checked by their text.** The hook finds paths and
+  URLs written in a command, not ones the command builds while it runs. If a
+  rule must hold for the shell, refuse the command outright
+  (`tool == "Bash"`).
 - **Where a call goes, not what it means.** Reading an allowed file and
   sending its contents to an allowed site is two allowed calls.
-- **Relative paths** such as `.` are refused under a workspace, because
-  chokepoint can't know the server's working folder. Agents recover by using
-  the full path.
+- **Relative paths through the proxy** such as `.` are refused under a
+  workspace, because the proxy can't know the agent's working folder. The
+  hook resolves them.
 
 ## Install
 
