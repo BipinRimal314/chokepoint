@@ -1127,3 +1127,78 @@ func TestWidenedSchemaDoesNotAdmitTheNewArgument(t *testing.T) {
 		t.Error("the widened schema admitted an argument the original refused")
 	}
 }
+
+// TestAlwaysEnforceBlocksInMonitorMode pins the one exception to monitor mode:
+// a rule marked always_enforce still refuses, and is recorded as a block.
+func TestAlwaysEnforceBlocksInMonitorMode(t *testing.T) {
+	pol := mustPolicy(t, `
+default_effect: allow
+workspace:
+  - /srv/data
+rules:
+  - name: no-secrets
+    match: targets.exists(t, t.contains("/.ssh/"))
+    effect: deny
+    always_enforce: true
+  - name: outside-workspace
+    match: scope_declared && out_of_scope.size() > 0
+    effect: deny
+`)
+	obs := &recordingObserver{}
+	g := New(Options{Policy: pol, Scope: mustScope(t, pol), Detector: detect.NewSession(detect.Config{}), Observer: obs, Monitor: true})
+
+	if got := intercept(t, g, toolCall(t, 1, "read_file", map[string]any{"path": "/home/u/.ssh/id_rsa"})); got.Decision != proxy.Reject {
+		t.Error("an always_enforce rule did not block in monitor mode")
+	}
+	if got := intercept(t, g, toolCall(t, 2, "read_file", map[string]any{"path": "/etc/hosts"})); got.Decision != proxy.Forward {
+		t.Error("an ordinary rule blocked in monitor mode")
+	}
+	rep := g.SessionReport()
+	if rep.Denials["no-secrets"] != 1 || rep.Violations["outside-workspace"] != 1 {
+		t.Errorf("denials %v violations %v", rep.Denials, rep.Violations)
+	}
+	if obs.decisions[0].Unenforced || !obs.decisions[1].Unenforced {
+		t.Errorf("enforcement recorded wrongly: %+v", obs.decisions)
+	}
+}
+
+// TestUnparseableMessagesAreRecorded pins that the proxy's unparseable
+// messages reach the audit trail in both modes.
+func TestUnparseableMessagesAreRecorded(t *testing.T) {
+	for _, refused := range []bool{true, false} {
+		obs := &recordingObserver{}
+		g := New(Options{Policy: mustPolicy(t, "rules: []\n"), Detector: detect.NewSession(detect.Config{}), Observer: obs, Monitor: !refused})
+		g.RecordUnparseable(refused, "invalid character 'N'")
+		if len(obs.decisions) != 1 || obs.decisions[0].Rule != RuleMalformedRequest || obs.decisions[0].Unenforced == refused {
+			t.Errorf("refused=%v: decisions %+v", refused, obs.decisions)
+		}
+		rep := g.SessionReport()
+		if refused && rep.Denials[RuleMalformedRequest] != 1 || !refused && rep.Violations[RuleMalformedRequest] != 1 {
+			t.Errorf("refused=%v: denials %v violations %v", refused, rep.Denials, rep.Violations)
+		}
+	}
+}
+
+// TestAlwaysEnforceCannotBeSidesteppedByAnAmbiguousRequest pins the hole the
+// hijacked-agent test found: with no-secrets always enforced in monitor mode,
+// a decoy "Arguments" key read the key the plain request could not.
+func TestAlwaysEnforceCannotBeSidesteppedByAnAmbiguousRequest(t *testing.T) {
+	raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/home/u/.ssh/id_rsa"},"Arguments":{"path":"/srv/data/ok"}}}`
+	for _, tc := range []struct {
+		policy string
+		want   proxy.Decision
+	}{
+		{"rules:\n  - name: no-secrets\n    match: targets.exists(t, t.contains('/.ssh/'))\n    effect: deny\n    always_enforce: true\n", proxy.Reject},
+		// Nothing always enforced: monitor mode lets everything through.
+		{"rules:\n  - name: no-secrets\n    match: targets.exists(t, t.contains('/.ssh/'))\n    effect: deny\n", proxy.Forward},
+	} {
+		g := New(Options{Policy: mustPolicy(t, tc.policy), Detector: detect.NewSession(detect.Config{}), Monitor: true})
+		msg, err := jsonrpc.Parse([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := intercept(t, g, msg).Decision; got != tc.want {
+			t.Errorf("policy %q: decision %v, want %v", tc.policy, got, tc.want)
+		}
+	}
+}

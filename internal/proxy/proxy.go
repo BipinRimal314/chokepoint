@@ -115,6 +115,9 @@ type Options struct {
 	// enforced: a server with a more lenient parser (Python's json accepts
 	// NaN, which Go refuses) would otherwise run a call nothing checked.
 	RejectUnparseable bool
+	// OnUnparseable is told about every client message that did not parse,
+	// and whether it was refused, so it can be recorded. Nil ignores them.
+	OnUnparseable func(refused bool, err error)
 }
 
 // DefaultDrainGrace is how long an upstream gets to answer outstanding
@@ -292,6 +295,9 @@ func (s *Session) pump(ctx context.Context, dir Direction, src io.Reader, dst *j
 // handle applies the interceptor to one message and routes the outcome.
 func (s *Session) handle(ctx context.Context, dir Direction, raw []byte, dst *jsonrpc.Writer) error {
 	msg, parseErr := jsonrpc.Parse(raw)
+	if parseErr != nil && dir == ClientToServer && s.opts.OnUnparseable != nil {
+		s.opts.OnUnparseable(s.opts.RejectUnparseable, parseErr)
+	}
 	if parseErr != nil && dir == ClientToServer && s.opts.RejectUnparseable {
 		s.reportError(dir, fmt.Errorf("refusing unparseable message: %w", parseErr))
 		reply, err := jsonrpc.ErrorResponse(nil, jsonrpc.CodeParseError,
