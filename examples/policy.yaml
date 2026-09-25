@@ -20,7 +20,7 @@
 #   schema_violations     list     what failed, bounded and sorted
 #   session_tools_changed    int   distinct tools changed since the first listing
 #   scope_declared        bool     whether `workspace` below is non-empty
-#   out_of_scope          list     this call's targets outside the workspace
+#   out_of_scope          list     this call's locations outside the workspace
 #   session_out_of_scope  int      distinct out-of-scope resources this session
 
 default_effect: allow

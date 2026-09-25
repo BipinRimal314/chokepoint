@@ -268,6 +268,7 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 	}
 
 	targets := policy.ExtractTargets(params.Arguments)
+	locations := policy.ExtractLocations(params.Arguments)
 
 	// One clock reading for the observation and the rate window both. Calling
 	// time.Now() again below would put this call fractionally in the past
@@ -283,11 +284,12 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 		PayloadBytes: len(msg.Params),
 		IsToolCall:   true,
 		At:           now,
+		Unscoped:     !contains(locations, firstOf(targets)),
 	})
 
 	assessment := g.assess()
 	scope := g.scopeReport()
-	outOfScope := g.outOfScope(targets)
+	outOfScope := g.outOfScope(locations)
 	// Read once. The policy request and the decision event both want it, and
 	// asking twice used to mean walking the whole session twice.
 	sessionTargets := g.distinctTargets()
@@ -539,8 +541,9 @@ func (g *Gateway) scopeReport() detect.ScopeReport {
 	return g.opts.Detector.ScopeReport(g.opts.Scope)
 }
 
-// outOfScope returns the targets of the current call that land outside the
-// working set, in the form the agent sent them.
+// outOfScope returns the locations of the current call that land outside the
+// working set, in the form the agent sent them. Targets that are not places
+// never reach it; see policy.ExtractLocations.
 //
 // This checks every target on the call, while the session-level counts from
 // scopeReport see only the one target retained per observation. A call naming
@@ -638,4 +641,14 @@ func ToolNameFromMethod(method string) string {
 		return method[i+1:]
 	}
 	return method
+}
+
+// contains reports whether s holds v.
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }

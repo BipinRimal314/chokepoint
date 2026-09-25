@@ -104,14 +104,15 @@ func ParseResource(raw string) Resource {
 // rather than escaping upward. Relative inputs stay relative — this package
 // has no working directory to resolve them against, and inventing one would
 // produce a confident wrong answer.
+//
+// That includes "." and "./", which stay ".". They name the server's working
+// directory, a real place, and collapsing them to "" read them as "no target",
+// so a recursive search of "." was never checked against a workspace.
 func cleanPath(p string) string {
 	if p == "" {
 		return ""
 	}
 	c := path.Clean(p)
-	if c == "." {
-		return ""
-	}
 	if len(c) > 1 {
 		c = strings.TrimSuffix(c, "/")
 	}

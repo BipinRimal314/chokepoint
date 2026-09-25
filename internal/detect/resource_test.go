@@ -79,9 +79,15 @@ func TestTraversalIsResolved(t *testing.T) {
 }
 
 func TestParseResourceEmpty(t *testing.T) {
-	for _, raw := range []string{"", "   ", "."} {
+	for _, raw := range []string{"", "   "} {
 		if got := ParseResource(raw); got.Path != "" || got.Root != "" {
 			t.Errorf("ParseResource(%q) should yield no resource, got %+v", raw, got)
+		}
+	}
+	// "." is the working directory, not nothing.
+	for _, raw := range []string{".", "./"} {
+		if got := ParseResource(raw); got.Empty() || got.Path != "." {
+			t.Errorf("ParseResource(%q) = %+v, want the relative resource \".\"", raw, got)
 		}
 	}
 }

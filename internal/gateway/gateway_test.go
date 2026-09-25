@@ -406,6 +406,60 @@ func TestBatchedReadOutOfWorkspaceIsDenied(t *testing.T) {
 	}
 }
 
+// TestDotIsCheckedAgainstTheWorkspace pins the bare-dot case. "." names the
+// server's working directory, a real place, and it used to be read as "no
+// target", which skipped the boundary entirely. A recursive search_files(".")
+// was allowed under an absolute workspace that denied "README.md".
+func TestDotIsCheckedAgainstTheWorkspace(t *testing.T) {
+	pol := mustPolicy(t, scopedPolicy)
+	g := New(Options{
+		Policy:   pol,
+		Scope:    mustScope(t, pol),
+		Detector: detect.NewSession(detect.Config{}),
+	})
+
+	for i, target := range []string{".", "./", "README.md"} {
+		got := intercept(t, g, toolCall(t, i+1, "search_files",
+			map[string]any{"path": target, "pattern": "*"}))
+		if got.Decision != proxy.Reject {
+			t.Errorf("%q under an absolute workspace was forwarded", target)
+		}
+	}
+	if n := g.scopeReport().Distinct; n != 2 {
+		t.Errorf("session out-of-scope count = %d, want 2 (. and README.md)", n)
+	}
+}
+
+// TestNonLocationTargetsAreNotScoped pins the database case: a declared
+// workspace must not deny calls whose targets are not places, and must not
+// count them toward session_out_of_scope either.
+func TestNonLocationTargetsAreNotScoped(t *testing.T) {
+	pol := mustPolicy(t, scopedPolicy)
+	g := New(Options{
+		Policy:   pol,
+		Scope:    mustScope(t, pol),
+		Detector: detect.NewSession(detect.Config{}),
+	})
+
+	for i, args := range []map[string]any{
+		{"query": "SELECT 1"},
+		{"bucket": "my-bucket", "key": "reports/q3.pdf"},
+	} {
+		if got := intercept(t, g, toolCall(t, i+1, "read_query", args)); got.Decision != proxy.Forward {
+			t.Errorf("%v was denied by a filesystem workspace", args)
+		}
+	}
+	if n := g.scopeReport().Distinct; n != 0 {
+		t.Errorf("session out-of-scope count = %d, want 0", n)
+	}
+
+	// An absolute path is a place whatever key carries it.
+	got := intercept(t, g, toolCall(t, 9, "read_query", map[string]any{"table": "/etc/shadow"}))
+	if got.Decision != proxy.Reject {
+		t.Error("an absolute path under a non-location key escaped the workspace check")
+	}
+}
+
 // TestScopeFactsAreAbsentWithoutAWorkspace pins the default. A deployment that
 // declared no working set must see no scope facts at all, so that a policy
 // copied from a scoped deployment fails inert rather than closed.

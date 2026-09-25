@@ -138,7 +138,7 @@ func TestNewScopeRejectsUnusableDeclarations(t *testing.T) {
 		{"   ", "empty"},
 		{"src/data", "relative"}, // silently matches nothing against absolute targets
 		{"./data", "relative"},
-		{".", "no resource"},
+		{".", "relative"},
 	}
 	for _, c := range cases {
 		_, err := NewScope([]string{c.decl})

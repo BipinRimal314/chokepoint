@@ -25,6 +25,11 @@ type Call struct {
 	Errored bool
 	// At is when the call was observed.
 	At time.Time
+	// Unscoped marks a Target that is not a place: a SQL statement, a bucket
+	// name, an object key. It still counts toward the score, since touching
+	// thirty tables is as broad as touching thirty files, but a declared
+	// workspace cannot contain it, so ScopeReport leaves it out.
+	Unscoped bool
 
 	// res is Target normalised, parsed once by Observe.
 	//

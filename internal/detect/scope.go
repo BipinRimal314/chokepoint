@@ -197,7 +197,7 @@ func (s *Session) ScopeReport(sc Scope) ScopeReport {
 			// Observe normalised this; a call whose target named no resource is
 			// not evidence of anything and is not counted as a place.
 			r := c.res
-			if r.Empty() {
+			if r.Empty() || c.Unscoped {
 				continue
 			}
 

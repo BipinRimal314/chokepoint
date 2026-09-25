@@ -389,9 +389,31 @@ func Parse(data []byte) (*Policy, error) {
 // argument schemas across servers, so the alternative is a per-server mapping
 // nobody will maintain.
 func ExtractTargets(args map[string]any) []string {
+	return extract(args, func(string, string) bool { return true })
+}
+
+// ExtractLocations returns the targets that name a place, which are the only
+// ones a declared workspace can be checked against.
+//
+// Not every target is a place. A SQL statement, a bucket name or an object key
+// is something a call touches, and parsing one as a filesystem path puts it
+// outside any workspace by construction: that denied every call to a database
+// server, SELECT 1 included. So a value counts as a location when its key names
+// one, or when the value is plainly an absolute path or a URI whatever key
+// carries it. The second clause stops a path being moved out of scope by
+// passing it under a key like "table".
+func ExtractLocations(args map[string]any) []string {
+	return extract(args, func(key, value string) bool {
+		return locationKeys[key] || looksLikeLocation(value)
+	})
+}
+
+// extract walks args and returns the sorted, distinct target values that keep
+// accepts. keep is given the lowercased key and the value.
+func extract(args map[string]any, keep func(key, value string) bool) []string {
 	const maxDepth = 4
 	seen := map[string]struct{}{}
-	collect(args, 0, maxDepth, seen)
+	collect(args, 0, maxDepth, keep, seen)
 
 	out := make([]string, 0, len(seen))
 	for t := range seen {
@@ -417,7 +439,41 @@ var targetKeys = map[string]bool{
 	"resources": true, "targets": true, "directories": true, "dirs": true,
 }
 
-func collect(v any, depth, maxDepth int, out map[string]struct{}) {
+// locationKeys are the target keys whose values name a place. The rest of
+// targetKeys (query, table, key, bucket, host, target) routinely carry
+// things that are not places; see ExtractLocations.
+//
+// host is left out deliberately: a bare hostname parses as a relative
+// filesystem path, which no workspace can contain. A URL carries its host
+// with a scheme and is checked.
+var locationKeys = map[string]bool{
+	"path": true, "file": true, "filename": true, "file_path": true,
+	"uri": true, "url": true, "resource": true, "directory": true, "dir": true,
+	"paths": true, "files": true, "filenames": true, "file_paths": true,
+	"uris": true, "urls": true, "resources": true, "directories": true, "dirs": true,
+}
+
+// looksLikeLocation reports whether a value is unmistakably a place: an
+// absolute POSIX or Windows path, a home-relative path, or a URI with a
+// scheme. Relative values are not claimed, since "reports/q3.pdf" under "key"
+// is an object key far more often than a file.
+func looksLikeLocation(v string) bool {
+	v = strings.TrimSpace(v)
+	switch {
+	case strings.HasPrefix(v, "/"), strings.HasPrefix(v, `\`), strings.HasPrefix(v, "~"):
+		return true
+	case len(v) >= 3 && v[1] == ':' && (v[2] == '/' || v[2] == '\\') && isASCIILetter(v[0]):
+		return true
+	}
+	scheme, _, ok := strings.Cut(v, "://")
+	return ok && len(scheme) > 1 && !strings.ContainsAny(scheme, " \t/")
+}
+
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func collect(v any, depth, maxDepth int, keep func(key, value string) bool, out map[string]struct{}) {
 	if depth > maxDepth {
 		// Bounded so a deeply nested or self-referential argument object
 		// cannot turn target extraction into an unbounded walk.
@@ -426,40 +482,41 @@ func collect(v any, depth, maxDepth int, out map[string]struct{}) {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, val := range t {
-			if targetKeys[strings.ToLower(k)] {
+			key := strings.ToLower(k)
+			if targetKeys[key] {
 				if s, ok := val.(string); ok {
-					if s != "" {
+					if s != "" && keep(key, s) {
 						out[s] = struct{}{}
 					}
 					continue
 				}
 				if items, ok := val.([]any); ok {
-					collectStrings(items, depth+1, maxDepth, out)
+					collectStrings(key, items, depth+1, maxDepth, keep, out)
 					continue
 				}
 			}
-			collect(val, depth+1, maxDepth, out)
+			collect(val, depth+1, maxDepth, keep, out)
 		}
 	case []any:
 		for _, item := range t {
-			collect(item, depth+1, maxDepth, out)
+			collect(item, depth+1, maxDepth, keep, out)
 		}
 	}
 }
 
 // collectStrings takes every non-empty string in a list held under a target
 // key as a target, and walks anything else in it as ordinary arguments.
-func collectStrings(items []any, depth, maxDepth int, out map[string]struct{}) {
+func collectStrings(key string, items []any, depth, maxDepth int, keep func(key, value string) bool, out map[string]struct{}) {
 	if depth > maxDepth {
 		return
 	}
 	for _, item := range items {
 		if s, ok := item.(string); ok {
-			if s != "" {
+			if s != "" && keep(key, s) {
 				out[s] = struct{}{}
 			}
 			continue
 		}
-		collect(item, depth+1, maxDepth, out)
+		collect(item, depth+1, maxDepth, keep, out)
 	}
 }

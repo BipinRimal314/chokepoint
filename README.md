@@ -157,7 +157,7 @@ Variables available to `match`:
 | `args_valid` | bool | arguments satisfied it; **true when `schema_known` is false** |
 | `schema_violations` | list\<string\> | what failed, bounded and sorted |
 | `scope_declared` | bool | whether a `workspace` was declared |
-| `out_of_scope` | list\<string\> | this call's targets outside the workspace |
+| `out_of_scope` | list\<string\> | this call's locations outside the workspace |
 | `session_out_of_scope` | int | distinct out-of-scope resources this session |
 
 Rules are evaluated top to bottom; the first non-`audit` match wins. An
@@ -194,6 +194,15 @@ not. Boundaries are segment-aligned: `/srv/data` does not contain
 `/srv/database`. Scheme, host and Windows volume must all match. A traversal
 that leaves the workspace is counted separately from a plainly external target
 — both are denied, but only one had to be constructed.
+
+Only targets that name a place are checked: values under `path`, `file`,
+`uri`, `url`, `directory`, `resource` and their plurals, plus any value that is
+plainly an absolute path or a URI whatever key carries it. A SQL `query`, a
+`bucket` or an object `key` is still a target for rules and the score, but a
+filesystem boundary cannot contain it, so it is never out of scope. Relative
+paths, `.` included, cannot be shown to be inside an absolute boundary without
+knowing the server's working directory, which the proxy does not, so they are
+out of scope.
 
 Declaring a workspace is **opt-in, and the default is none**. Without it
 `scope_declared` is false, nothing is ever out of scope, and rules guarding on

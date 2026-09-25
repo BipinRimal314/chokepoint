@@ -274,6 +274,37 @@ func TestExtractTargetsReadsArrays(t *testing.T) {
 	}
 }
 
+// TestExtractLocationsKeepsOnlyPlaces pins which targets a workspace applies
+// to. A SQL statement, a bucket name or an object key is something a call
+// touches, not a place, and checking it against a filesystem boundary denied
+// every call to a database server, SELECT 1 included. A value that is plainly
+// an absolute path or URI is still a place whatever key carries it, so moving
+// a path under a non-location key does not take it out of scope.
+func TestExtractLocationsKeepsOnlyPlaces(t *testing.T) {
+	args := map[string]any{
+		"query":  "SELECT 1",
+		"bucket": "my-bucket",
+		"key":    "reports/q3.pdf",
+		"host":   "api.internal",
+		"table":  "/etc/shadow",
+		"target": "s3://other-bucket/x",
+		"path":   "notes.txt",
+		"paths":  []any{"/srv/a"},
+		"url":    "https://example.com/x",
+	}
+
+	got := ExtractLocations(args)
+	want := []string{"/etc/shadow", "/srv/a", "https://example.com/x", "notes.txt", "s3://other-bucket/x"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("locations = %v, want %v", got, want)
+	}
+
+	// Targets are unchanged: rules and the score still see everything.
+	if n := len(ExtractTargets(args)); n != 9 {
+		t.Errorf("ExtractTargets returned %d targets, want 9", n)
+	}
+}
+
 func TestExtractTargetsIsDeterministic(t *testing.T) {
 	// Map iteration order is randomised; an audit record that reorders between
 	// runs over identical input is not usable as evidence.

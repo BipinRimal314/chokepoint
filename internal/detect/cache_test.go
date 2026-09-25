@@ -67,8 +67,11 @@ func TestEvictionPreservesTheParsedResource(t *testing.T) {
 // A target that names nothing must stay uncounted. Caching makes the two
 // reasons a call is skipped — no target, and a target that parses to nothing —
 // collapse into one check, so both are pinned here rather than trusted.
+//
+// "." is not in this list: it names the server's working directory and is
+// counted, which TestDotIsAResource pins.
 func TestTargetlessCallsAreNotResources(t *testing.T) {
-	s := observe(t, []string{"/srv/data/a", "", "   ", ".", "/srv/data/b"})
+	s := observe(t, []string{"/srv/data/a", "", "   ", "/srv/data/b"})
 
 	if got := s.ResourceSummary(); got.Calls != 2 || got.Distinct != 2 {
 		t.Errorf("ResourceSummary: Calls=%d Distinct=%d, want 2 and 2", got.Calls, got.Distinct)
@@ -80,5 +83,24 @@ func TestTargetlessCallsAreNotResources(t *testing.T) {
 	}
 	if got := s.ScopeReport(sc); got.Calls != 2 || got.OutOfScope != 0 {
 		t.Errorf("ScopeReport: Calls=%d OutOfScope=%d, want 2 and 0", got.Calls, got.OutOfScope)
+	}
+}
+
+// TestDotIsAResource pins that "." is a place. It used to parse to nothing,
+// which kept a recursive search of the server's working directory out of every
+// scope check.
+func TestDotIsAResource(t *testing.T) {
+	s := observe(t, []string{"/srv/data/a", ".", "./"})
+
+	if got := s.ResourceSummary(); got.Calls != 3 || got.Distinct != 2 {
+		t.Errorf("ResourceSummary: Calls=%d Distinct=%d, want 3 and 2", got.Calls, got.Distinct)
+	}
+
+	sc, err := NewScope([]string{"/srv/data"})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	if got := s.ScopeReport(sc); got.OutOfScope != 2 || got.Distinct != 1 {
+		t.Errorf("ScopeReport: OutOfScope=%d Distinct=%d, want 2 and 1", got.OutOfScope, got.Distinct)
 	}
 }
