@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -258,7 +259,16 @@ func rewriteServers(path string, edit func(name string, srv map[string]any) (str
 // folder is one `git add .` away from publishing them.
 func auditDir() (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
+	switch {
+	case base != "":
+	case runtime.GOOS == "windows":
+		// %LocalAppData%, which is per user and not roamed.
+		dir, err := os.UserCacheDir()
+		if err != nil {
+			return "", err
+		}
+		base = dir
+	default:
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -48,8 +49,12 @@ func TestWrapAndUnwrap(t *testing.T) {
 	if _, has := cfg["mcpServers"].(map[string]any)["remote"].(map[string]any)["command"]; has {
 		t.Error("a remote server was given a command")
 	}
-	if info, err := os.Stat(filepath.Join(dir, "state", "chokepoint")); err != nil || info.Mode().Perm() != 0o700 {
-		t.Errorf("audit directory must be private: %v %v", info, err)
+	// Windows has no permission bits; a folder in the user's profile is
+	// private by its ACL instead.
+	if info, err := os.Stat(filepath.Join(dir, "state", "chokepoint")); err != nil {
+		t.Error(err)
+	} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		t.Errorf("audit directory mode = %v, want 0700", info.Mode().Perm())
 	}
 	if got, _ := os.ReadFile(".mcp.json.chokepoint-backup"); string(got) != original {
 		t.Error("backup does not hold the original")
