@@ -20,8 +20,11 @@ reads hundreds of tool calls.
 
 ## What chokepoint does
 
-It sits in the pipe between the agent and each MCP server. The agent does not
-know it is there. Every call passes through it, and for each one it:
+It checks each call in one of two places, or both. As a proxy, it sits in the
+pipe between the agent and each MCP server, and works with any MCP client.
+As a Claude Code hook, it runs inside the agent's harness before every tool
+call, so it also sees the built-in tools (`Read`, `Bash`, `WebFetch`) that
+never touch MCP. Both use the same rules, log and report. For each call it:
 
 1. **Reads the call exactly as the server will.** If the message is ambiguous
    (the same field twice, or `arguments` and `Arguments`) it is refused, since
@@ -58,12 +61,15 @@ chokepoint report            # read what happened
 
 ## What it cannot do
 
-- **It only sees MCP.** An agent's built-in tools do not go through it, and
-  neither does anything a shell command does once it is running. With Claude
-  Code, `--tools ""` switches every built-in off. Disabling `Bash` alone is
-  not enough: in testing, Claude read a file through another built-in tool.
-  Or run the agent in a sandbox whose network rules are the wall, and use
-  chokepoint as the record.
+- **The proxy only sees MCP.** An agent's built-in tools do not go through
+  it. With Claude Code, the hook covers them. Other agents: switch their
+  built-in tools off, or run them in a sandbox whose network rules are the
+  wall and use chokepoint as the record.
+- **Shell commands are judged by their text.** The hook reads the paths and
+  URLs written in a command. A path the command builds while it runs, or a
+  `cd` before it, is not seen. Network commands are refused outright for that
+  reason, and a command that names a protected file is refused even if it
+  only reads it.
 - **Monitor mode records; it does not protect.** A hijacked agent in monitor
   mode did everything it tried. The report is how you find out. Mark a rule
   `always_enforce: true` to keep it blocking in monitor mode.

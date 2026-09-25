@@ -28,6 +28,7 @@ var subcommands = map[string]func(args []string) error{
 	"wrap":   cmdWrap,
 	"unwrap": cmdUnwrap,
 	"report": cmdReport,
+	"hook":   cmdHook,
 }
 
 const defaultPolicyFile = "chokepoint.yaml"
@@ -64,7 +65,11 @@ func cmdInit(args []string) error {
 		return err
 	}
 	defer f.Close()
-	if _, err := f.WriteString(starterPolicy(dir, mode)); err != nil {
+	logs, err := auditDir()
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(starterPolicy(dir, mode, logs)); err != nil {
 		return err
 	}
 	fmt.Printf("wrote %s (mode: %s, workspace: %s)\n", out, mode, dir)
@@ -180,56 +185,87 @@ func cmdUnwrap(args []string) error {
 // result back only if something changed, keeping the previous version as
 // <config>.chokepoint-backup.
 func rewriteServers(path string, edit func(name string, srv map[string]any) (string, bool)) error {
-	original, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(original, &doc); err != nil {
+	var probe struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	var servers map[string]map[string]any
-	if raw, ok := doc["mcpServers"]; ok {
-		if err := json.Unmarshal(raw, &servers); err != nil {
-			return fmt.Errorf("%s: mcpServers: %w", path, err)
-		}
-	}
-	if len(servers) == 0 {
+	if len(probe.MCPServers) == 0 {
 		return fmt.Errorf("%s has no mcpServers", path)
 	}
+	return editJSONFile(path, false, func(doc map[string]any) (string, bool) {
+		servers, _ := doc["mcpServers"].(map[string]any)
+		if len(servers) == 0 {
+			return "", false
+		}
+		names := make([]string, 0, len(servers))
+		for n := range servers {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		changed := false
+		for _, n := range names {
+			srv, ok := servers[n].(map[string]any)
+			if !ok {
+				continue
+			}
+			note, did := edit(n, srv)
+			changed = changed || did
+			fmt.Printf("  %-20s %s\n", n, note)
+		}
+		return "", changed
+	})
+}
 
-	names := make([]string, 0, len(servers))
-	for n := range servers {
-		names = append(names, n)
+// editJSONFile applies edit to a JSON object file and writes it back only if
+// something changed, keeping the previous version as <file>.chokepoint-backup
+// and replacing the file atomically, so a crash leaves the old version or the
+// new one and never half of each. With create, a missing file starts empty.
+func editJSONFile(path string, create bool, edit func(doc map[string]any) (string, bool)) error {
+	original, err := os.ReadFile(path)
+	missing := errors.Is(err, os.ErrNotExist)
+	switch {
+	case missing && create:
+		original = nil
+	case err != nil:
+		return err
 	}
-	sort.Strings(names)
-	changed := false
-	for _, n := range names {
-		note, did := edit(n, servers[n])
-		changed = changed || did
-		fmt.Printf("  %-20s %s\n", n, note)
+	doc := map[string]any{}
+	if len(bytes.TrimSpace(original)) > 0 {
+		if err := json.Unmarshal(original, &doc); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	note, changed := edit(doc)
+	if note != "" {
+		fmt.Println("  " + note)
 	}
 	if !changed {
 		fmt.Println("nothing to change")
 		return nil
 	}
 
-	if doc["mcpServers"], err = json.Marshal(servers); err != nil {
-		return err
-	}
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(path)
-	if err != nil {
+	perm := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	if !missing {
+		if err := os.WriteFile(path+".chokepoint-backup", original, perm); err != nil {
+			return fmt.Errorf("write backup: %w", err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path+".chokepoint-backup", original, info.Mode().Perm()); err != nil {
-		return fmt.Errorf("write backup: %w", err)
-	}
-	// Written beside the original and renamed over it, so a crash leaves
-	// either the old config or the new one, never half of each.
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".chokepoint-*")
 	if err != nil {
 		return err
@@ -239,7 +275,7 @@ func rewriteServers(path string, edit func(name string, srv map[string]any) (str
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
+	if err := tmp.Chmod(perm); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -249,7 +285,11 @@ func rewriteServers(path string, edit func(name string, srv map[string]any) (str
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err
 	}
-	fmt.Printf("updated %s (previous version in %s.chokepoint-backup)\n", path, filepath.Base(path))
+	if missing {
+		fmt.Printf("created %s\n", path)
+	} else {
+		fmt.Printf("updated %s (previous version in %s.chokepoint-backup)\n", path, filepath.Base(path))
+	}
 	fmt.Println("restart your agent so it picks up the change")
 	return nil
 }

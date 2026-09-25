@@ -501,6 +501,8 @@ var targetKeys = map[string]bool{
 	"paths": true, "files": true, "filenames": true, "file_paths": true,
 	"uris": true, "urls": true, "hosts": true, "hostnames": true,
 	"resources": true, "targets": true, "directories": true, "dirs": true,
+	// Claude Code's NotebookEdit.
+	"notebook_path": true,
 }
 
 // locationKeys are the target keys whose values name a place. The rest of
@@ -515,6 +517,7 @@ var locationKeys = map[string]bool{
 	"uri": true, "url": true, "resource": true, "directory": true, "dir": true,
 	"paths": true, "files": true, "filenames": true, "file_paths": true,
 	"uris": true, "urls": true, "resources": true, "directories": true, "dirs": true,
+	"notebook_path": true,
 }
 
 // looksLikeLocation reports whether a value is unmistakably a place: an

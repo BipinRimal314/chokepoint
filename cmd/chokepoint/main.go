@@ -91,6 +91,9 @@ func usage() {
   chokepoint wrap [CONFIG]             route an MCP config's servers through chokepoint
                                        (default .mcp.json; also Claude Desktop, Cursor)
   chokepoint unwrap [CONFIG]           undo wrap
+  chokepoint hook install              check every Claude Code tool call, built-in tools
+                                       included (.claude/settings.local.json)
+  chokepoint hook uninstall            undo hook install
   chokepoint report [--since 24h] [--all] [LOGS...]
                                        what the agent did, and every breach
   chokepoint [options] -- <mcp-server-command> [args...]

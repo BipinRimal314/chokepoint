@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -12,7 +13,13 @@ import (
 // armed on day one without a week of tuning. The behavioural score is left
 // out on purpose: measured on real sessions, it cannot separate careful work
 // from a sweep (docs/single-tool-sweep.md).
-func starterPolicy(workspace, mode string) string {
+//
+// auditDir is where this machine's audit logs go, written into the
+// self-protection rule as a literal path: a pattern cannot tell the log
+// folder from any other folder named chokepoint, and it would miss a parent
+// folder being deleted with the logs inside.
+func starterPolicy(workspace, mode, auditDir string) string {
+	logs := strconv.Quote(auditDir)
 	return fmt.Sprintf(`# chokepoint policy, written by `+"`chokepoint init`"+`.
 #
 # Every tool call your agent makes through a wrapped MCP server is checked
@@ -24,7 +31,7 @@ func starterPolicy(workspace, mode string) string {
 #          it as a violation. Switch without editing: --mode monitor.
 #          Monitor mode blocks nothing, except rules marked
 #          always_enforce: true (see no-secrets below).
-mode: %s
+mode: %[1]s
 
 default_effect: allow
 
@@ -35,11 +42,32 @@ default_effect: allow
 # web request is out of bounds, which is what you want for an agent that
 # should stay off the internet.
 workspace:
-  - %s
+  - %[2]s
   # - https://docs.python.org
   # - https://api.github.com
 
 rules:
+  # The agent may not change what watches it: these rules, its MCP config,
+  # Claude Code's or Cursor's settings, or the audit logs. An agent that can
+  # unwrap its servers or delete the log can end its own supervision, and in
+  # monitor mode it would erase the record that mode exists to keep. So this
+  # one blocks in monitor mode too; delete always_enforce to let it through.
+  # Shell commands that name these files are refused whether they read or
+  # write them, since a command's effect cannot be told from its text.
+  - name: protect-agent-config
+    match: >-
+      (tool.matches("(?i)(write|edit|create|move|rename|delete|remove|notebook)") || tool == "Bash") &&
+      targets.exists(t,
+        t.matches("(^|[/\\\\])(chokepoint\\.yaml|\\.mcp\\.json|\\.mcp\\.json\\.chokepoint-backup|claude_desktop_config\\.json)$") ||
+        t.matches("(^|[/\\\\])\\.(claude|cursor)([/\\\\]|$)") ||
+        t.startsWith(%[3]s) ||
+        (%[3]s.startsWith(t + "/") &&
+          (tool.matches("(?i)(delete|remove|move|rename)") ||
+           (tool == "Bash" && args.command.matches("(^|[\\s;&|(])(rm|mv|rmdir|shred|unlink)(\\s|$)")))))
+    effect: deny
+    always_enforce: true
+    message: The agent may not change its own rules, tool configuration or audit logs.
+
   # A server that changes a tool's definition mid-session is the signature of
   # tool poisoning: the agent re-reads the new description and follows it.
   - name: tool-definition-changed
@@ -51,10 +79,10 @@ rules:
   - name: no-secrets
     match: >-
       targets.exists(t,
-        t.matches("(^|/)(\\.ssh|\\.aws|\\.gnupg|\\.kube|\\.docker|\\.azure|\\.config/gcloud)(/|$)") ||
-        t.matches("(^|/)\\.env(\\.(local|dev|development|prod|production|staging|test))?$") ||
+        t.matches("(^|[/\\\\])(\\.ssh|\\.aws|\\.gnupg|\\.kube|\\.docker|\\.azure|\\.config/gcloud)([/\\\\]|$)") ||
+        t.matches("(^|[/\\\\])\\.env(\\.(local|dev|development|prod|production|staging|test))?$") ||
         t.matches("\\.(pem|key|p12|pfx|keystore|jks)$") ||
-        t.matches("(^|/)(id_rsa|id_dsa|id_ecdsa|id_ed25519|\\.netrc|\\.git-credentials|\\.pgpass|\\.npmrc|\\.pypirc|credentials|credentials\\.json)$") ||
+        t.matches("(^|[/\\\\])(id_rsa|id_dsa|id_ecdsa|id_ed25519|\\.netrc|\\.git-credentials|\\.pgpass|\\.npmrc|\\.pypirc|credentials|credentials\\.json)$") ||
         t.matches("^(file://)?/etc/(shadow|gshadow|sudoers)"))
     effect: deny
     # Uncomment to keep this blocking even in monitor mode.
@@ -71,6 +99,18 @@ rules:
     # always_enforce: true
     message: Cloud instance metadata is off limits to the agent.
 
+  # Raw network commands in a shell. The hook reads paths and URLs out of a
+  # command's text, and "curl example.com" has no URL in it to check, so the
+  # commands themselves are refused and the agent is pointed at a web tool
+  # the workspace can check. Package managers (npm, pip, git) are not
+  # covered; add them here if the agent must not install anything.
+  - name: no-shell-network
+    match: >-
+      tool == "Bash" && has(args.command) &&
+      args.command.matches("(^|[\\s;&|(\\x60$])(curl|wget|nc|ncat|netcat|socat|telnet|ssh|scp|sftp|rsync|ftp)(\\s|$)")
+    effect: deny
+    message: Network commands in the shell are off limits; use the web fetch tool, which is checked against the allowed sites.
+
   # The boundary declared in workspace above.
   - name: outside-workspace
     match: scope_declared && out_of_scope.size() > 0
@@ -81,7 +121,7 @@ rules:
   - name: watch-changes
     match: tool.matches("(?i)(write|edit|create|move|rename|delete|remove)")
     effect: audit
-`, mode, yamlQuote(workspace))
+`, mode, yamlQuote(workspace), logs)
 }
 
 // yamlQuote makes a path safe as a YAML scalar.

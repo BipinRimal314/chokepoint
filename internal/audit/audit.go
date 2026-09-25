@@ -184,6 +184,10 @@ type Writer struct {
 type Options struct {
 	// OnError is called at most once, on the first write failure.
 	OnError func(error)
+	// TraceID groups records from several processes into one session, such
+	// as the one-process-per-call Claude Code hook. 32 hex characters, as
+	// OTLP requires. Empty picks a random one.
+	TraceID string
 }
 
 // New returns a Writer emitting to w.
@@ -195,7 +199,7 @@ func New(w io.Writer, opts Options) *Writer {
 	return &Writer{
 		w:         w,
 		enc:       enc,
-		traceID:   randomHex(16),
+		traceID:   traceIDOr(opts.TraceID),
 		onError:   opts.OnError,
 		nowFunc:   time.Now,
 		newSpanID: func() string { return randomHex(8) },
@@ -350,4 +354,13 @@ func randomHex(n int) string {
 		return hex.EncodeToString([]byte(strconv.FormatInt(time.Now().UnixNano(), 16)))[:n*2]
 	}
 	return hex.EncodeToString(b)
+}
+
+func traceIDOr(id string) string {
+	if len(id) == 32 {
+		if _, err := hex.DecodeString(id); err == nil {
+			return id
+		}
+	}
+	return randomHex(16)
 }
