@@ -56,6 +56,7 @@ const (
 
 	KeyEffect         = "chokepoint.policy.effect"
 	KeyRule           = "chokepoint.policy.rule"
+	KeyEnforced       = "chokepoint.policy.enforced"
 	KeyTargets        = "chokepoint.targets"
 	KeyScore          = "chokepoint.decomposition.score"
 	KeySessionCalls   = "chokepoint.session.calls"
@@ -95,6 +96,12 @@ func Attributes(ev gateway.DecisionEvent) []Attr {
 	}
 	if ev.ID != "" {
 		attrs = append(attrs, Attr{KeyGenAIToolCall, ev.ID})
+	}
+	if ev.Effect == policy.EffectDeny {
+		// Every deny says whether it was carried out. A log read later must
+		// not have to know which mode the proxy was in to tell a block from
+		// a breach that went ahead.
+		attrs = append(attrs, Attr{KeyEnforced, !ev.Unenforced})
 	}
 	if ev.Rule != "" {
 		attrs = append(attrs, Attr{KeyRule, ev.Rule})
@@ -223,8 +230,13 @@ func (w *Writer) ToolCallDecided(ev gateway.DecisionEvent) {
 	if ev.Effect == policy.EffectDeny {
 		// 2 is STATUS_CODE_ERROR. A refusal is the record most likely to be
 		// read, so it is marked rather than left to be inferred from an
-		// attribute.
-		rec.Status = &spanStatus{Code: 2, Message: "denied by policy: " + ev.Rule}
+		// attribute. A violation monitor mode let through is marked too, and
+		// says so.
+		msg := "denied by policy: " + ev.Rule
+		if ev.Unenforced {
+			msg = "policy violation allowed (monitor mode): " + ev.Rule
+		}
+		rec.Status = &spanStatus{Code: 2, Message: msg}
 	}
 
 	w.mu.Lock()

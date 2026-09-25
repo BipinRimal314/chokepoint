@@ -262,3 +262,32 @@ func TestCompletionsAreNotRecorded(t *testing.T) {
 		t.Errorf("a completion wrote a record: %s", b.String())
 	}
 }
+
+// TestEveryDenySaysWhetherItWasEnforced pins monitor mode in the evidence log:
+// a record read later must tell a block from a breach that went ahead without
+// knowing how the proxy was configured.
+func TestEveryDenySaysWhetherItWasEnforced(t *testing.T) {
+	blocked := attrMap(t, Attributes(decision()))
+	if blocked[KeyEnforced] != true {
+		t.Errorf("enforced deny: %s = %v, want true", KeyEnforced, blocked[KeyEnforced])
+	}
+
+	breach := decision()
+	breach.Unenforced = true
+	if got := attrMap(t, Attributes(breach))[KeyEnforced]; got != false {
+		t.Errorf("monitor-mode deny: %s = %v, want false", KeyEnforced, got)
+	}
+
+	allowed := decision()
+	allowed.Effect = policy.EffectAllow
+	if _, present := attrMap(t, Attributes(allowed))[KeyEnforced]; present {
+		t.Error("an allowed call carries an enforcement attribute")
+	}
+
+	var b bytes.Buffer
+	New(&b, Options{}).ToolCallDecided(breach)
+	status, _ := records(t, &b)[0]["status"].(map[string]any)
+	if msg, _ := status["message"].(string); !strings.Contains(msg, "allowed (monitor mode)") {
+		t.Errorf("status.message = %q, want it to say the violation was allowed", msg)
+	}
+}

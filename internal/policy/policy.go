@@ -85,7 +85,13 @@ type Policy struct {
 	// be combined with the tool, the scope and the score rather than standing
 	// alone as a bucket that only knows how to count.
 	RateWindow string `yaml:"rate_window"`
-	Rules      []Rule `yaml:"rules"`
+	// Mode is enforce, the default, or monitor. In monitor mode a call the
+	// policy denies is still forwarded, and recorded as a violation that was
+	// not enforced: for agents that must keep running unattended, where a
+	// refused call would stop the work, but every breach still has to be
+	// reported.
+	Mode  Mode   `yaml:"mode"`
+	Rules []Rule `yaml:"rules"`
 
 	// rateWindow is RateWindow parsed, so a malformed duration is a load-time
 	// error rather than a window that silently reverts to the default.
@@ -154,6 +160,25 @@ type Request struct {
 	SchemaViolations []string
 }
 
+// Mode says what a deny does.
+type Mode string
+
+const (
+	// ModeEnforce refuses a denied call.
+	ModeEnforce Mode = "enforce"
+	// ModeMonitor forwards a denied call and records it as a violation.
+	ModeMonitor Mode = "monitor"
+)
+
+// Valid reports whether m is a known mode.
+func (m Mode) Valid() error {
+	switch m {
+	case ModeEnforce, ModeMonitor:
+		return nil
+	}
+	return fmt.Errorf("mode: must be %q or %q, got %q", ModeEnforce, ModeMonitor, m)
+}
+
 // Decision is the outcome of evaluating a policy.
 type Decision struct {
 	Effect Effect
@@ -208,6 +233,13 @@ func (p *Policy) Compile() error {
 	}
 	if err := validEffect(p.DefaultEffect); err != nil {
 		return fmt.Errorf("default_effect: %w", err)
+	}
+
+	if p.Mode == "" {
+		p.Mode = ModeEnforce
+	}
+	if err := p.Mode.Valid(); err != nil {
+		return err
 	}
 
 	if s := strings.TrimSpace(p.RateWindow); s != "" {

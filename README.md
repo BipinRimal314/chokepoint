@@ -99,6 +99,13 @@ inert there rather than guessing.
   call is checked against it on the resolved path rather than the raw string —
   so a boundary is not one `../` from useless. Unlike the score, this verdict
   does not move with session length, tool vocabulary, padding, or timing.
+- **Enforce or monitor.** `mode: enforce` (the default) refuses a denied
+  call. `mode: monitor`, or `--mode monitor` on the command line, lets it
+  through so an unattended agent keeps working, and records each one as a
+  violation: in the log, in the session report under "ALLOWED", in metrics as
+  `effect="violation_allowed"`, and in the audit log with
+  `chokepoint.policy.enforced=false`. Nothing records a monitored breach as a
+  block.
 - **Denials are protocol-correct.** A blocked call returns a well-formed
   JSON-RPC error with a matching id and an explanation. The connection stays
   up; a policy decision is not an outage.

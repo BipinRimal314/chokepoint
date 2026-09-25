@@ -460,6 +460,57 @@ func TestNonLocationTargetsAreNotScoped(t *testing.T) {
 	}
 }
 
+// TestMonitorModeForwardsAndRecordsViolations pins the continuous-running
+// switch: a call the policy denies goes through, and is recorded as a breach
+// that was not stopped rather than as a block or as nothing.
+func TestMonitorModeForwardsAndRecordsViolations(t *testing.T) {
+	pol := mustPolicy(t, scopedPolicy)
+	obs := &recordingObserver{}
+	g := New(Options{
+		Policy:   pol,
+		Scope:    mustScope(t, pol),
+		Detector: detect.NewSession(detect.Config{}),
+		Observer: obs,
+		Monitor:  true,
+	})
+
+	got := intercept(t, g, toolCall(t, 1, "read_file", map[string]any{"path": "/etc/shadow"}))
+	if got.Decision != proxy.Forward {
+		t.Fatal("monitor mode refused a call")
+	}
+	got = intercept(t, g, toolCall(t, 2, "read_file", map[string]any{"path": "/srv/data/a"}))
+	if got.Decision != proxy.Forward {
+		t.Fatal("monitor mode refused an allowed call")
+	}
+
+	if len(obs.decisions) != 2 {
+		t.Fatalf("got %d events, want 2", len(obs.decisions))
+	}
+	if ev := obs.decisions[0]; ev.Effect != policy.EffectDeny || !ev.Unenforced || ev.Rule != "outside-workspace" {
+		t.Errorf("violation event = effect %q unenforced %v rule %q", ev.Effect, ev.Unenforced, ev.Rule)
+	}
+	if ev := obs.decisions[1]; ev.Unenforced {
+		t.Error("an allowed call was marked unenforced")
+	}
+
+	rep := g.SessionReport()
+	if rep.Violations["outside-workspace"] != 1 || len(rep.Denials) != 0 {
+		t.Errorf("report violations %v denials %v, want 1 violation and no denials", rep.Violations, rep.Denials)
+	}
+}
+
+// TestEnforceModeStillRefuses pins that the switch defaults off.
+func TestEnforceModeStillRefuses(t *testing.T) {
+	pol := mustPolicy(t, scopedPolicy)
+	g := New(Options{Policy: pol, Scope: mustScope(t, pol), Detector: detect.NewSession(detect.Config{})})
+	if got := intercept(t, g, toolCall(t, 1, "read_file", map[string]any{"path": "/etc/shadow"})); got.Decision != proxy.Reject {
+		t.Error("enforce mode forwarded a denied call")
+	}
+	if rep := g.SessionReport(); rep.Denials["outside-workspace"] != 1 || len(rep.Violations) != 0 {
+		t.Errorf("report denials %v violations %v", rep.Denials, rep.Violations)
+	}
+}
+
 // TestScopeFactsAreAbsentWithoutAWorkspace pins the default. A deployment that
 // declared no working set must see no scope facts at all, so that a policy
 // copied from a scoped deployment fails inert rather than closed.

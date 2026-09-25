@@ -25,6 +25,11 @@
 
 default_effect: allow
 
+# enforce refuses a denied call. monitor lets it through and records it as a
+# violation, for agents that must keep running unattended. `--mode` on the
+# command line overrides this.
+mode: enforce
+
 # How far back calls_in_window and targets_in_window look. There is no limit
 # setting to go with it — the limit is a rule, so it sits with the others and
 # can be combined with the tool, the scope and the score.

@@ -34,6 +34,10 @@ type SessionReport struct {
 	Scope detect.ScopeReport
 	// Denials counts calls refused, by rule name.
 	Denials map[string]int
+	// Violations counts calls the policy denied but monitor mode forwarded,
+	// by rule name. These happened; the report must not let them read as
+	// stopped.
+	Violations map[string]int
 	// ToolChanges are tool definitions that changed after the session's first
 	// tools/list. Reported before anything else, because a mutated definition
 	// re-frames every call made after it.
@@ -46,12 +50,23 @@ func (g *Gateway) SessionReport() SessionReport {
 		Assessment:  g.assess(),
 		Scope:       g.scopeReport(),
 		Denials:     g.denialCounts(),
+		Violations:  g.violationCounts(),
 		ToolChanges: g.opts.Inventory.Changes(),
 	}
 	if g.opts.Detector != nil {
 		rep.Resources = g.opts.Detector.ResourceSummary()
 	}
 	return rep
+}
+
+func (g *Gateway) violationCounts() map[string]int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make(map[string]int, len(g.violations))
+	for k, v := range g.violations {
+		out[k] = v
+	}
+	return out
 }
 
 func (g *Gateway) denialCounts() map[string]int {
@@ -104,6 +119,12 @@ func (r SessionReport) Render(w io.Writer, limit int) error {
 		fmt.Fprintf(&b, "  %d calls denied:\n", totalOf(r.Denials))
 		for _, rule := range sortedByCount(r.Denials) {
 			fmt.Fprintf(&b, "    %-32s %d\n", rule, r.Denials[rule])
+		}
+	}
+	if len(r.Violations) > 0 {
+		fmt.Fprintf(&b, "  %d policy violations ALLOWED (monitor mode, not blocked):\n", totalOf(r.Violations))
+		for _, rule := range sortedByCount(r.Violations) {
+			fmt.Fprintf(&b, "    %-32s %d\n", rule, r.Violations[rule])
 		}
 	}
 

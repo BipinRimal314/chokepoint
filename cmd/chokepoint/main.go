@@ -40,6 +40,7 @@ const reportGroupLimit = 10
 
 type config struct {
 	policyPath   string
+	mode         string
 	window       time.Duration
 	maxCalls     int
 	logLevel     string
@@ -74,6 +75,9 @@ func usage() {
 
 options:
   --policy PATH     policy file (YAML); omit for a transparent proxy
+  --mode MODE       enforce: refuse denied calls (default)
+                    monitor: let them through and record each as a violation
+                    overrides the policy file's mode
   --window DUR      behavioural window, e.g. 10m (default: whole session)
   --max-calls N     per-session call retention cap (default 10000)
   --metrics-addr A  serve Prometheus metrics on A, e.g. :9090 (default off)
@@ -114,6 +118,11 @@ func parseArgs(args []string) (config, error) {
 		switch arg {
 		case "--policy":
 			cfg.policyPath, err = next()
+		case "--mode":
+			cfg.mode, err = next()
+			if err == nil {
+				err = policy.Mode(cfg.mode).Valid()
+			}
 		case "--log-level":
 			cfg.logLevel, err = next()
 		case "--metrics-addr":
@@ -147,6 +156,12 @@ func parseArgs(args []string) (config, error) {
 		}
 	}
 
+	if cfg.mode != "" && cfg.policyPath == "" {
+		// Without a policy nothing is evaluated, so a mode would describe
+		// protection that is not there.
+		return cfg, errors.New("--mode needs --policy")
+	}
+
 	cfg.upstream = args[i:]
 	if !cfg.showVersion && len(cfg.upstream) == 0 {
 		return cfg, errors.New("no upstream command given; pass it after --")
@@ -168,6 +183,10 @@ func run(cfg config) error {
 			// is in place.
 			return fmt.Errorf("load policy: %w", err)
 		}
+		if cfg.mode != "" {
+			pol.Mode = policy.Mode(cfg.mode)
+		}
+		logger.Info("policy loaded", "mode", string(pol.Mode), "rules", len(pol.Rules))
 		// Same reasoning for the working set: a boundary that cannot be parsed
 		// would contain nothing, so every scope rule would report clean while
 		// enforcing nothing.
@@ -265,7 +284,8 @@ func run(cfg config) error {
 	logger.Info("upstream started", "command", cfg.upstream[0], "pid", cmd.Process.Pid)
 
 	gw := gateway.New(gateway.Options{
-		Policy: pol,
+		Policy:  pol,
+		Monitor: pol != nil && pol.Mode == policy.ModeMonitor,
 		Detector: detect.NewSession(detect.Config{
 			Window:   cfg.window,
 			MaxCalls: cfg.maxCalls,

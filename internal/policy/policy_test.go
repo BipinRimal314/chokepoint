@@ -519,3 +519,20 @@ rules:
 		})
 	}
 }
+
+func TestModeDefaultsToEnforceAndRejectsUnknown(t *testing.T) {
+	p, err := Parse([]byte("rules: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Mode != ModeEnforce {
+		t.Errorf("default mode = %q, want %q", p.Mode, ModeEnforce)
+	}
+	if p, err = Parse([]byte("mode: monitor\nrules: []\n")); err != nil || p.Mode != ModeMonitor {
+		t.Errorf("mode: monitor gave %v, %v", p, err)
+	}
+	// A typo must not silently fall back to either mode.
+	if _, err := Parse([]byte("mode: monitr\nrules: []\n")); err == nil {
+		t.Error("an unknown mode was accepted")
+	}
+}

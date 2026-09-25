@@ -44,6 +44,11 @@ type DecisionEvent struct {
 	Effect  policy.Effect
 	Rule    string
 	Audited []string
+	// Unenforced is true when Effect is deny but monitor mode forwarded the
+	// call anyway. The decision is recorded as the policy made it; this says
+	// the call was not stopped, so no record can be read as a block that did
+	// not happen.
+	Unenforced bool
 
 	Score float64
 	// ScoreUnavailable is true when the session is too short to score. The
@@ -153,6 +158,10 @@ type Options struct {
 	Inventory *inventory.Registry
 	Logger    *slog.Logger
 	Observer  Observer
+	// Monitor forwards calls the policy denies instead of refusing them, and
+	// records each as a violation that was not enforced. It is the switch for
+	// agents that must keep running unattended.
+	Monitor bool
 }
 
 // Gateway implements proxy.Interceptor.
@@ -174,6 +183,8 @@ type Gateway struct {
 	// distinguishable from an allowed one in the observation stream — the
 	// detector records what was attempted, not what was permitted.
 	denials map[string]int
+	// violations counts denials monitor mode let through, by rule name.
+	violations map[string]int
 }
 
 type pendingCall struct {
@@ -193,10 +204,11 @@ func New(opts Options) *Gateway {
 		opts.Inventory = inventory.NewRegistry()
 	}
 	return &Gateway{
-		opts:     opts,
-		pending:  make(map[string]pendingCall),
-		listings: make(map[string]struct{}),
-		denials:  make(map[string]int),
+		opts:       opts,
+		pending:    make(map[string]pendingCall),
+		listings:   make(map[string]struct{}),
+		denials:    make(map[string]int),
+		violations: make(map[string]int),
 	}
 }
 
@@ -319,6 +331,8 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 		SchemaViolations: violations,
 	})
 
+	unenforced := decision.Effect == policy.EffectDeny && g.opts.Monitor
+
 	if g.opts.Observer != nil {
 		g.opts.Observer.ToolCallDecided(DecisionEvent{
 			ID:               msg.IDKey(),
@@ -328,6 +342,7 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 			Effect:           decision.Effect,
 			Rule:             decision.Rule,
 			Audited:          decision.Audited,
+			Unenforced:       unenforced,
 			Score:            assessment.Score,
 			ScoreUnavailable: assessment.BelowMinimum,
 			SessionCalls:     assessment.Calls,
@@ -350,8 +365,19 @@ func (g *Gateway) inspectToolCall(msg *jsonrpc.Message) (proxy.Interception, err
 		})
 	}
 
-	switch decision.Effect {
-	case policy.EffectDeny:
+	switch {
+	case unenforced:
+		g.recordViolation(decision.Rule)
+		g.opts.Logger.Warn("policy violation allowed (monitor mode)",
+			"tool", params.Name,
+			"rule", decision.Rule,
+			"targets", targets,
+			"out_of_scope", len(outOfScope),
+		)
+		g.trackPending(msg, params.Name)
+		return proxy.Interception{Decision: proxy.Forward}, nil
+
+	case decision.Effect == policy.EffectDeny:
 		g.recordDenial(decision.Rule)
 		g.opts.Logger.Warn("tool call denied",
 			"tool", params.Name,
@@ -415,6 +441,16 @@ func (g *Gateway) recordDenial(rule string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.denials[rule]++
+}
+
+// recordViolation counts one denial that monitor mode did not enforce.
+func (g *Gateway) recordViolation(rule string) {
+	if rule == "" {
+		rule = "default_effect"
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.violations[rule]++
 }
 
 // trackListing remembers a tools/list request id.

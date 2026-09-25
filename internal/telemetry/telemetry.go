@@ -286,11 +286,17 @@ func (t *Telemetry) startTracing(ctx context.Context, opts Options) error {
 // ToolCallDecided implements gateway.Observer.
 func (t *Telemetry) ToolCallDecided(ev gateway.DecisionEvent) {
 	if t.metrics != nil {
-		t.metrics.toolCalls.WithLabelValues(ev.Tool, string(ev.Effect)).Inc()
+		effect := string(ev.Effect)
+		if ev.Unenforced {
+			// Its own label value, so a dashboard of denials never counts a
+			// call that went ahead.
+			effect = "violation_allowed"
+		}
+		t.metrics.toolCalls.WithLabelValues(ev.Tool, effect).Inc()
 		for _, rule := range ev.Audited {
 			t.metrics.audits.WithLabelValues(rule).Inc()
 		}
-		if ev.Effect == policy.EffectDeny {
+		if ev.Effect == policy.EffectDeny && !ev.Unenforced {
 			t.metrics.denials.WithLabelValues(ev.Tool, ev.Rule).Inc()
 		}
 		// NaN while the session is too short to score. 0.0 is a real score
@@ -318,7 +324,14 @@ func (t *Telemetry) ToolCallDecided(ev gateway.DecisionEvent) {
 		trace.WithAttributes(attrs...),
 	)
 
-	if ev.Effect == policy.EffectDeny {
+	if ev.Unenforced {
+		// Forwarded, so the upstream will answer and the span stays open for
+		// the completion like any allowed call. Marked as an error so the
+		// breach is visible in a trace.
+		span.SetStatus(codes.Error, "policy violation allowed (monitor mode): "+ev.Rule)
+	}
+
+	if ev.Effect == policy.EffectDeny && !ev.Unenforced {
 		// A denied call is answered locally and no upstream response will ever
 		// arrive, so the span ends here. Holding it open waiting for a
 		// completion that cannot come would leak one span per denial —
